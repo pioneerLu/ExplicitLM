@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from experiments.configs.LMConfig import LMConfig
+from models.configs.LMConfig import LMConfig
 from models.layers.Attention import Attention
 from models.layers.RMSNorm import RMSNorm
 from models.layers.MemoryGate import MemoryGate

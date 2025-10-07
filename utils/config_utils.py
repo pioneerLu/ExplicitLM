@@ -6,7 +6,7 @@
 import argparse
 import inspect
 import typing
-from experiments.configs.LMConfig import LMConfig
+from models.configs.LMConfig import LMConfig
 
 
 def _add_argument_by_type(parser: argparse.ArgumentParser, param_name: str,
@@ -183,5 +183,13 @@ def print_config(config: LMConfig):
     print(f"  max_subject_len: {config.max_subject_len}")
     print(f"  max_predicate_len: {config.max_predicate_len}")
     print(f"  max_object_len: {config.max_object_len}")
+
+    # 模型初始化相关配置
+    print("\n【模型初始化相关配置】")
+    print(f"  model_variant: {config.model_variant}")
+    print(f"  pretrained_embedding_path: {config.pretrained_embedding_path}")
+    print(f"  database_init_path: {config.database_init_path}")
+    print(f"  cache_path: {config.cache_path}")
+    print(f"  recompute_cache: {config.recompute_cache}")
 
     print("\n" + "=" * 80)
