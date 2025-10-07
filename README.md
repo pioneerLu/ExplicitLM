@@ -8,9 +8,9 @@ ExplicitLM是一个创新的语言模型架构，通过引入显式记忆库（M
 ExplicitLM/                     # 项目根目录
 ├── models/                     # 模型架构实现
 │   ├── core/                  # 核心Transformer组件
-│   ├── memory_bank/           # Memory Bank层实现
-│   ├── retrieval/             # 两阶段检索机制
-│   └── layers/                # 自定义层实现
+│   ├── memory_bank/           # Memory Bank层及两阶段检索机制实现
+│   ├── configs/               # 模型配置文件
+│   └── layers/                # 自定义模块实现
 ├── data/                       # 数据管理
 │   ├── raw/                   # 原始数据集
 │   ├── processed/             # 预处理后数据
@@ -18,7 +18,6 @@ ExplicitLM/                     # 项目根目录
 │   └── benchmarks/            # 评估数据集
 ├── evaluation/                 # 评估和分析
 ├── experiments/                # 实验管理
-│   ├── configs/               # 实验配置文件
 │   ├── scripts/               # 实验运行脚本
 │   └── results/               # 实验结果存储
 ├── scripts/                    # 实用脚本
