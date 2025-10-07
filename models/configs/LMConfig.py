@@ -65,6 +65,20 @@ class LMConfig(PretrainedConfig):
             max_subject_len: int = 8,
             max_predicate_len: int = 4,
             max_object_len: int = 8,
+            ####################################################
+            # SwanLab实验追踪相关配置
+            ####################################################
+            use_swanlab: bool = False,
+            swanlab_online: bool = False,
+            swanlab_project: str = "MiniMind",
+            ####################################################
+            # 模型初始化相关配置
+            ####################################################
+            model_variant: str = "model_memory",  # 模型变体类型：model, model_original, model_no_feed, model_memory
+            pretrained_embedding_path: str = None,  # 预训练嵌入权重文件路径
+            database_init_path: str = None,  # 知识库/记忆库初始化数据文件路径
+            cache_path: str = "cache/knowledge_cache.pt",  # 处理后数据的缓存路径
+            recompute_cache: bool = False,  # 是否强制重新计算缓存
             **kwargs,
     ):
         ####################################################
@@ -125,4 +139,18 @@ class LMConfig(PretrainedConfig):
         self.max_subject_len = max_subject_len
         self.max_predicate_len = max_predicate_len
         self.max_object_len = max_object_len
+        ####################################################
+        # SwanLab实验追踪相关配置
+        ####################################################
+        self.use_swanlab = use_swanlab
+        self.swanlab_online = swanlab_online
+        self.swanlab_project = swanlab_project
+        ####################################################
+        # 模型初始化相关配置
+        ####################################################
+        self.model_variant = model_variant
+        self.pretrained_embedding_path = pretrained_embedding_path
+        self.database_init_path = database_init_path
+        self.cache_path = cache_path
+        self.recompute_cache = recompute_cache
         super().__init__(**kwargs)
