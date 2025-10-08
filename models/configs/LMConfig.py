@@ -79,6 +79,15 @@ class LMConfig(PretrainedConfig):
             database_init_path: str = None,  # 知识库/记忆库初始化数据文件路径
             cache_path: str = "cache/knowledge_cache.pt",  # 处理后数据的缓存路径
             recompute_cache: bool = False,  # 是否强制重新计算缓存
+            ####################################################
+            # 训练相关配置
+            ####################################################
+            dataset_path: str = "data/database/merged_pretrain.jsonl",  # 预训练数据集路径
+            batch_size: int = 48,  # 训练批次大小
+            accumulation_steps: int = 16,  # 梯度累积步数
+            epochs: int = 3,  # 训练轮数
+            learning_rate: float = 2e-4,  # 学习率
+            out_dir: str = "out",  # 输出目录
             **kwargs,
     ):
         ####################################################
@@ -153,4 +162,13 @@ class LMConfig(PretrainedConfig):
         self.database_init_path = database_init_path
         self.cache_path = cache_path
         self.recompute_cache = recompute_cache
+        ####################################################
+        # 训练相关配置
+        ####################################################
+        self.dataset_path = dataset_path
+        self.batch_size = batch_size
+        self.accumulation_steps = accumulation_steps
+        self.epochs = epochs
+        self.learning_rate = learning_rate
+        self.out_dir = out_dir
         super().__init__(**kwargs)

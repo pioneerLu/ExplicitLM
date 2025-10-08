@@ -14,6 +14,7 @@ from utils.config_utils import setup_config
 from utils.logger import logger
 from accelerate import Accelerator, DistributedDataParallelKwargs, DeepSpeedPlugin
 from accelerate.utils import set_seed
+from utils.pretrain_datasets import create_pretrain_dataloader
 
 try:
     import swanlab
@@ -141,10 +142,26 @@ def main():
     logger(f"模型已准备完毕，设备: {accelerator.device}", accelerator)
 
     #########################################################
-    # TODO: 第七阶段 - 数据加载器初始化
+    # 第七阶段：数据加载器初始化
     #########################################################
-    # train_dataloader = ...
-    # train_dataloader = accelerator.prepare(train_dataloader)
+    logger("开始初始化数据加载器...", accelerator)
+
+    train_dataloader = create_pretrain_dataloader(
+        data_path=args.dataset_path,
+        tokenizer=tokenizer,
+        batch_size=args.batch_size,
+        max_length=args.max_seq_len,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True
+    )
+
+    logger(f"数据加载器初始化完成，批次大小: {args.batch_size}", accelerator)
+
+    # 使用Accelerator准备数据加载器
+    train_dataloader = accelerator.prepare(train_dataloader)
+
+    logger(f"数据加载器已准备完毕", accelerator)
 
     #########################################################
     # TODO: 第八阶段 - 优化器初始化
