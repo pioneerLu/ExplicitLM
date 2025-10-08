@@ -1,0 +1,7 @@
+[core]
+    remote = minio
+['remote "minio"']
+    url = s3://explicitlm
+    endpointurl = http://192.168.31.231:11900
+    secret_access_key = ExplicitLM510
+    access_key_id = ExplicitLM
