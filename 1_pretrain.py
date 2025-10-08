@@ -10,11 +10,14 @@
 import os
 from typing import Optional, Dict, Any
 
+import torch.optim as optim
+from transformers import get_cosine_schedule_with_warmup
+
 from utils.config_utils import setup_config
 from utils.logger import logger
 from accelerate import Accelerator, DistributedDataParallelKwargs, DeepSpeedPlugin
 from accelerate.utils import set_seed
-from utils.pretrain_datasets import create_pretrain_dataloader,create_validation_dataloader
+from utils.pretrain_datasets import create_pretrain_dataloader, create_validation_dataloader
 
 try:
     import swanlab
@@ -173,10 +176,71 @@ def main():
     logger(f"数据加载器已准备完毕", accelerator)
 
     #########################################################
-    # TODO: 第八阶段 - 优化器初始化
+    # 第八阶段：优化器和调度器初始化
     #########################################################
-    # optimizer = ...
-    # optimizer = accelerator.prepare(optimizer)
+    logger("开始初始化优化器和调度器...", accelerator)
+
+    # 第一步：参数过滤（支持EMA模式）
+    # 注意：模型已被accelerator.prepare()包装，需要通过.module访问原始配置
+    try:
+        # 尝试获取原始模型的配置（处理DeepSpeed/DDP包装）
+        if hasattr(model, 'module'):
+            model_config = model.module.config
+        else:
+            model_config = model.config
+
+        # 检查是否启用EMA更新
+        use_ema = getattr(model_config, 'use_ema_update', False)
+
+        if use_ema:
+            # EMA模式：只优化requires_grad=True的参数（过滤掉memory_bank等）
+            optimizer_params = [p for p in model.parameters() if p.requires_grad]
+            trainable_params = sum(p.numel() for p in optimizer_params)
+            total_params = sum(p.numel() for p in model.parameters())
+            logger(f"EMA更新模式：优化器包含 {len(optimizer_params)} 个参数", accelerator)
+            logger(f"总参数: {total_params:,} | 可训练参数: {trainable_params:,}", accelerator)
+        else:
+            # 传统模式：所有参数都参与优化
+            optimizer_params = model.parameters()
+            logger("传统梯度更新模式：优化器包含所有模型参数", accelerator)
+    except Exception as e:
+        # 兜底：如果无法访问配置，默认使用所有参数
+        logger(f"警告：无法访问模型配置 ({e})，使用所有参数", accelerator)
+        optimizer_params = model.parameters()
+
+    # 第二步：创建优化器（在accelerator.prepare之前）
+    optimizer = optim.AdamW(
+        optimizer_params,
+        lr=args.learning_rate,
+        betas=(0.9, 0.95),      # 与预训练最佳实践一致
+        weight_decay=0.1         # 正则化防止过拟合
+    )
+
+    logger(f"优化器创建完成: AdamW (lr={args.learning_rate}, betas=(0.9, 0.95), weight_decay=0.1)", accelerator)
+
+    # 第三步：计算调度器参数
+    # 注意：考虑梯度累积，实际优化步数 = 数据步数 / 累积步数
+    steps_per_epoch = len(train_dataloader) // args.accumulation_steps
+    total_steps = steps_per_epoch * args.epochs
+    warmup_steps = int(0.1 * total_steps)  # 10%步数用于warm-up
+
+    logger(f"训练配置: epochs={args.epochs}, steps_per_epoch={steps_per_epoch}, total_steps={total_steps}", accelerator)
+    logger(f"学习率调度: warmup_steps={warmup_steps} (10% of total)", accelerator)
+
+    # 第四步：创建学习率调度器
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps
+    )
+
+    logger("学习率调度器创建完成: CosineScheduleWithWarmup", accelerator)
+
+    # 第五步：使用Accelerator准备优化器和调度器（关键！）
+    # 这一步让DeepSpeed接管优化器管理，实现ZeRO优化和CPU offload
+    optimizer, scheduler = accelerator.prepare(optimizer, scheduler)
+
+    logger("优化器和调度器已准备完毕（DeepSpeed ZeRO-2 + CPU offload已激活）", accelerator)
 
     #########################################################
     # TODO: 第九阶段 - 训练循环

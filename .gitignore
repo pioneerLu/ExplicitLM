@@ -3,3 +3,4 @@ CLAUDE.md
 .serena/
 .python-version
 uv.lock
+data/benchmarks/
