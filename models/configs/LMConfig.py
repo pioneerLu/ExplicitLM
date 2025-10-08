@@ -83,6 +83,7 @@ class LMConfig(PretrainedConfig):
             # 训练相关配置
             ####################################################
             dataset_path: str = "data/database/merged_pretrain.jsonl",  # 预训练数据集路径
+            val_dataset_path: str = "data/benchmarks/eval_data.json",  # 验证数据集路径
             batch_size: int = 48,  # 训练批次大小
             accumulation_steps: int = 16,  # 梯度累积步数
             epochs: int = 3,  # 训练轮数
@@ -166,6 +167,7 @@ class LMConfig(PretrainedConfig):
         # 训练相关配置
         ####################################################
         self.dataset_path = dataset_path
+        self.val_dataset_path = val_dataset_path
         self.batch_size = batch_size
         self.accumulation_steps = accumulation_steps
         self.epochs = epochs

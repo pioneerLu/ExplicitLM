@@ -14,7 +14,7 @@ from utils.config_utils import setup_config
 from utils.logger import logger
 from accelerate import Accelerator, DistributedDataParallelKwargs, DeepSpeedPlugin
 from accelerate.utils import set_seed
-from utils.pretrain_datasets import create_pretrain_dataloader
+from utils.pretrain_datasets import create_pretrain_dataloader,create_validation_dataloader
 
 try:
     import swanlab
@@ -156,10 +156,19 @@ def main():
         pin_memory=True
     )
 
+    val_loader = create_validation_dataloader(
+        val_data_path=args.val_dataset_path,
+        tokenizer=tokenizer,
+        batch_size=args.batch_size,
+        max_length=args.max_seq_len,
+        num_samples=200
+    )
+
     logger(f"数据加载器初始化完成，批次大小: {args.batch_size}", accelerator)
 
     # 使用Accelerator准备数据加载器
     train_dataloader = accelerator.prepare(train_dataloader)
+    val_loader = accelerator.prepare(val_loader)
 
     logger(f"数据加载器已准备完毕", accelerator)
 

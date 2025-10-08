@@ -228,3 +228,183 @@ def validate_dataset(
     }
 
     return stats
+
+
+class ValidationDataset(Dataset):
+    """
+    验证数据集类
+
+    功能：
+    - 从JSON/JSONL文件加载验证数据
+    - 支持限制样本数量以加快验证
+    - 兼容PretrainDataset的数据格式
+
+    数据格式：
+    输入：JSON/JSONL文件，每行包含'text'字段
+    输出：与PretrainDataset相同的(X, Y, loss_mask)元组
+    """
+
+    def __init__(
+        self,
+        data_path: str,
+        tokenizer: Any,
+        max_length: int = 512,
+        num_samples: int = 200
+    ):
+        """
+        初始化验证数据集
+
+        Args:
+            data_path: JSON/JSONL验证数据文件路径
+            tokenizer: Tokenizer实例
+            max_length: 最大序列长度
+            num_samples: 验证样本数量限制，用于加快验证速度
+        """
+        super().__init__()
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.num_samples = num_samples
+        self.samples = self._load_validation_data(data_path)
+
+    def _load_validation_data(self, path: str) -> List[Dict[str, Any]]:
+        """
+        从JSON/JSONL文件加载验证数据
+
+        Args:
+            path: 验证数据文件路径
+
+        Returns:
+            样本列表
+        """
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"验证数据文件不存在: {path}")
+
+        samples = []
+        with open(path, 'r', encoding='utf-8') as f:
+            for i, line in enumerate(f):
+                if i >= self.num_samples:  # 限制验证样本数量
+                    break
+
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    data = json.loads(line)
+                    # 提取text字段
+                    if 'text' in data:
+                        samples.append({'text': data['text']})
+                except json.JSONDecodeError:
+                    continue
+
+        return samples
+
+    def __len__(self) -> int:
+        """返回数据集大小"""
+        return len(self.samples)
+
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        获取单个样本，与PretrainDataset保持相同的接口
+
+        Args:
+            index: 样本索引
+
+        Returns:
+            (X, Y, loss_mask)元组
+            - X: 输入序列张量 [max_length-1]
+            - Y: 目标序列张量 [max_length-1]
+            - loss_mask: 损失掩码张量 [max_length-1]
+        """
+        sample = self.samples[index]
+        text = str(sample['text'])
+
+        # 添加特殊token：<|im_start|>text<|im_end|>
+        if not text.startswith(self.tokenizer.bos_token):
+            text = f"{self.tokenizer.bos_token}{text}"
+        if not text.endswith(self.tokenizer.eos_token):
+            text = f"{text}{self.tokenizer.eos_token}"
+
+        # Tokenization with padding and truncation
+        encoding = self.tokenizer(
+            text,
+            max_length=self.max_length,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt'
+        )
+
+        # 提取input_ids并生成loss_mask
+        input_ids = encoding.input_ids.squeeze()  # [max_length]
+        loss_mask = (input_ids != self.tokenizer.pad_token_id)  # [max_length]
+
+        # 生成训练对：X = input_ids[:-1], Y = input_ids[1:]
+        X = input_ids[:-1].clone()  # [max_length-1]
+        Y = input_ids[1:].clone()   # [max_length-1]
+        loss_mask = loss_mask[1:]   # [max_length-1]
+
+        return X, Y, loss_mask
+
+
+def create_validation_dataloader(
+    val_data_path: str,
+    tokenizer: Any,
+    batch_size: int,
+    max_length: int = 512,
+    num_samples: int = 200,
+    num_workers: int = 4,
+    pin_memory: bool = True
+) -> DataLoader:
+    """
+    创建验证数据加载器的工厂函数
+
+    Args:
+        val_data_path: 验证数据文件路径
+        tokenizer: Tokenizer实例
+        batch_size: 批次大小
+        max_length: 最大序列长度，默认512
+        num_samples: 验证样本数量，默认200
+        num_workers: 数据加载进程数，默认4
+        pin_memory: 是否使用pin_memory加速GPU传输，默认True
+
+    Returns:
+        DataLoader实例，如果文件不存在返回None
+
+    使用示例：
+        ```python
+        from utils.pretrain_datasets import create_validation_dataloader
+
+        val_loader = create_validation_dataloader(
+            val_data_path='data/benchmarks/eval_data.json',
+            tokenizer=tokenizer,
+            batch_size=32,
+            max_length=512,
+            num_samples=200
+        )
+
+        if val_loader is not None:
+            for batch_idx, (X, Y, loss_mask) in enumerate(val_loader):
+                # X, Y, loss_mask: [batch_size, max_length-1]
+                ...
+        ```
+    """
+    if not os.path.exists(val_data_path):
+        return None
+
+    dataset = ValidationDataset(
+        data_path=val_data_path,
+        tokenizer=tokenizer,
+        max_length=max_length,
+        num_samples=num_samples
+    )
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,  # 验证集不需要打乱
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=False  # 验证集保留所有样本
+    )
+
+    return dataloader
