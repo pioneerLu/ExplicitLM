@@ -1,2 +1,5 @@
 **/__*
 CLAUDE.md
+.serena/
+.python-version
+uv.lock

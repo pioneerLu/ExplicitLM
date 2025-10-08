@@ -1,0 +1,6 @@
+outs:
+- md5: 542c81f0707220f8a730ca5671f9cb56.dir
+  size: 446039334
+  nfiles: 1
+  hash: md5
+  path: knowledge_base
