@@ -8,8 +8,11 @@
 """
 
 import os
+import time
+import gc
 from typing import Optional, Dict, Any
 
+import torch
 import torch.optim as optim
 from transformers import get_cosine_schedule_with_warmup
 
@@ -18,6 +21,7 @@ from utils.logger import logger
 from accelerate import Accelerator, DistributedDataParallelKwargs, DeepSpeedPlugin
 from accelerate.utils import set_seed
 from utils.pretrain_datasets import create_pretrain_dataloader, create_validation_dataloader
+from utils.train_loop import train_epoch
 
 try:
     import swanlab
@@ -243,11 +247,46 @@ def main():
     logger("优化器和调度器已准备完毕（DeepSpeed ZeRO-2 + CPU offload已激活）", accelerator)
 
     #########################################################
-    # TODO: 第九阶段 - 训练循环
+    # 第九阶段：训练循环
     #########################################################
-    # for epoch in range(config.num_epochs):
-    #     for batch in train_dataloader:
-    #         ...
+    logger("开始训练循环...", accelerator)
+
+    # 记录整体训练开始时间
+    overall_start_time = time.time()
+
+    # Epoch循环
+    for epoch in range(args.epochs):
+        logger(f"开始第{epoch+1}轮训练", accelerator)
+
+        train_epoch(
+            epoch=epoch,
+            accelerator=accelerator,
+            model=model,
+            train_loader=train_dataloader,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            args=args,
+            overall_start_time=overall_start_time,
+            swanlab_run=swanlab_run,
+            tokenizer=tokenizer,
+            val_loader=val_loader
+        )
+
+        # 每个epoch结束后进行内存清理
+        logger(f"第{epoch+1}轮训练完成，进行内存清理", accelerator)
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    #########################################################
+    # 第十阶段：关闭SwanLab
+    #########################################################
+    if hasattr(args, 'use_swanlab') and args.use_swanlab and accelerator.is_main_process:
+        if swanlab_run is not None:
+            swanlab_run.finish()
+            logger("SwanLab运行已结束", accelerator)
+
+    logger("训练完成！", accelerator)
 
 
 if __name__ == '__main__':
