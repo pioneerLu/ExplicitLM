@@ -279,6 +279,19 @@ def main():
             torch.cuda.empty_cache()
 
     #########################################################
+    # 导出SwanLab URL（训练完成后，关闭之前）
+    #########################################################
+    if accelerator.is_main_process and swanlab_run:
+        # 获取SwanLab实验URL
+        exp_url = swanlab_run.url if hasattr(swanlab_run, 'url') else "N/A"
+
+        # 写入临时文件供脚本读取
+        with open('.swanlab_url', 'w') as f:
+            f.write(exp_url)
+
+        logger(f"SwanLab URL已保存: {exp_url}", accelerator)
+
+    #########################################################
     # 第十阶段：关闭SwanLab
     #########################################################
     if hasattr(args, 'use_swanlab') and args.use_swanlab and accelerator.is_main_process:
