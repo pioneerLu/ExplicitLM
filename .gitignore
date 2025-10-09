@@ -1,6 +1,61 @@
-**/__*
-CLAUDE.md
+# ========== 原有规则 ==========
+**/__pycache__
+*.pyc
+*.pyo
+__pycache__/
 .serena/
 .python-version
 uv.lock
-data/benchmarks/
+
+# ========== DVC管理的大文件（实际文件被DVC追踪）==========
+# 数据文件（保留.dvc元文件）
+/data/raw/*
+!/data/raw/.gitkeep
+/data/processed/*
+!/data/processed/.gitkeep
+/data/knowledge_base/*
+!/data/knowledge_base/.gitkeep
+!/data/knowledge_base/*.dvc
+/data/database/*
+!/data/database/.gitkeep
+!/data/database/*.dvc
+/data/benchmarks/*
+!/data/benchmarks/.gitkeep
+!/data/benchmarks/*.dvc
+
+# 模型权重（保留.dvc元文件）
+/checkpoints/*
+!/checkpoints/.gitkeep
+!/checkpoints/*.dvc
+
+# ========== DVC内部文件 ==========
+/.dvc/tmp
+/.dvc/cache
+/.dvc/config.local
+
+# ========== 实验运行产物（不追踪）==========
+/logs/*
+!/logs/.gitkeep
+/experiments/results/*
+!/experiments/results/.gitkeep
+
+# SwanLab日志
+swanlog/
+wandb/
+
+# 临时文件
+.swanlab_url
+.experiment_meta
+
+# ========== IDE和系统文件 ==========
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+
+# ========== 不提交的配置（可选）==========
+# 如果包含敏感信息，取消下面注释
+# .env
+# secrets.yaml
+**/CLAUDE.md
