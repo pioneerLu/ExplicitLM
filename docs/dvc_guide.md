@@ -121,6 +121,7 @@ cat .dvc/config
 | 数据集名称 | 版本标识 | 创建日期 | 数据大小 | 标签 | 说明 |
 |-----------|---------|---------|---------|------|------|
 | `merged_pretrain.jsonl`<br>(database) | `fd5f22a` | 2025-10-08 | 10.77 GB | 🔵 默认<br>🟢 ICLR2026 | 预训练数据集第一版，包含合并后的预训练语料，用于所有基准实验 |
+| `merged_pretrain.jsonl`<br>(database) | `2806566` | 2025-10-12 | 7.2 MB | 🟡 测试 | 测试专用版本，仅包含5000条数据，保持与完整版相同格式，便于快速测试 |
 | `sentence_trex_data.json`<br>(knowledge_base) | `f3ca080` | 2025-10-08 | 446 MB | 🔵 默认<br>🟢 ICLR2026 | T-REx 知识库句子数据第一版，包含结构化知识三元组，用于所有知识注入实验 |
 | `eval_data.json`<br>(benchmarks) | `cd7f9bb` | 2025-10-12 | 28 KB | 🔵 默认<br>🟢 ICLR2026 | 基准测试数据集第一版，用于模型评估和性能验证 |
 | `knowledge_cache.pt`<br>`cluster_tokens_single_mapping.json`<br>(cache) | `fda7333` | 2025-10-12 | 466 MB | 🔵 默认<br>🟢 ICLR2026 | 缓存数据第一版，包含知识缓存和聚类token映射，用于加速训练 |
@@ -131,6 +132,19 @@ git checkout main
 dvc pull
 ```
 
+**切换到测试版本（5000条数据）**:
+```bash
+# 1. 切换到测试版本的提交
+git checkout 2806566 data/database.dvc
+
+# 2. 拉取测试数据
+dvc checkout data/database.dvc
+
+# 3. 如果需要恢复到默认版本
+git checkout main data/database.dvc
+dvc checkout data/database.dvc
+```
+
 ---
 
-**注意**: 所有数据集文件本身不会提交到 Git，只有 `.dvc` 元数据文件会被 Git 跟踪。默认使用 v1.0-iclr2026 版本的数据集进行实验。
+**注意**: 所有数据集文件本身不会提交到 Git，只有 `.dvc` 元数据文件会被 Git 跟踪。默认使用 v1.0-iclr2026 版本的数据集进行实验。测试版本（🟡 测试）适合快速开发和调试，完整版本（🔵 默认）用于正式实验。
