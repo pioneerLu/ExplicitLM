@@ -18,11 +18,11 @@ import torch.nn.functional as F
 from models.configs.LMConfig import LMConfig
 from models.layers.Attention import Attention
 from models.layers.RMSNorm import RMSNorm
-from models.layers.MemoryGate import MemoryGate
-from models.layers.GatedMemoryFusion import GatedMemoryFusion
+from models.memory_bank.MemoryGate import MemoryGate
+from models.memory_bank.GatedMemoryFusion import GatedMemoryFusion
 
 
-class MiniMindBlock(nn.Module):
+class ExplicitLMBlock(nn.Module):
     """
     Transformer块，使用基于记忆的交叉注意力机制替代传统FFN
 
@@ -35,7 +35,7 @@ class MiniMindBlock(nn.Module):
 
     def __init__(self, layer_id: int, config: LMConfig) -> None:
         """
-        初始化MiniMindBlock
+        初始化ExplicitLMBlock
 
         Args:
             layer_id: 当前层的ID索引

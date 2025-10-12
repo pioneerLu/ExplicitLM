@@ -37,7 +37,7 @@ ExplicitLM/                          # 项目根目录
 │   ├── pretrain_datasets.py        # 数据加载器（支持训练集和验证集）
 │   ├── train_loop.py               # 训练循环实现
 │   ├── train_utils.py              # 训练辅助工具
-│   └── logger.py                   # 分布式日志工具
+│   └── Logger.py                   # 分布式日志工具
 ├── data/                            # 数据管理（DVC追踪）
 │   ├── database/                    # 预训练数据集
 │   │   └── merged_pretrain.jsonl   # 训练数据（10.77 GB）
