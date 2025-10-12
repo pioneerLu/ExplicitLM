@@ -40,13 +40,14 @@ ExplicitLM/                          # 项目根目录
 │   └── logger.py                   # 分布式日志工具
 ├── data/                            # 数据管理（DVC追踪）
 │   ├── database/                    # 预训练数据集
-│   │   ├── merged_pretrain.jsonl   # 训练数据
-│   │   └── *.dvc                   # DVC版本追踪文件
+│   │   └── merged_pretrain.jsonl   # 训练数据（10.77 GB）
+│   ├── database.dvc                 # database目录DVC追踪文件
 │   ├── benchmarks/                  # 验证数据集
-│   │   ├── eval_data.json          # 评估数据
-│   │   └── *.dvc                   # DVC版本追踪文件
+│   │   └── eval_data.json          # 评估数据（28 KB）
+│   ├── benchmarks.dvc               # benchmarks目录DVC追踪文件
 │   ├── knowledge_base/              # 显式知识库数据
-│   ├── processed/                   # 预处理后的数据
+│   │   └── sentence_trex_data.json # T-REx知识库（446 MB）
+│   ├── knowledge_base.dvc           # knowledge_base目录DVC追踪文件
 │   └── raw/                         # 原始数据
 ├── experiments/                     # 实验管理系统
 │   ├── scripts/                     # 实验运行脚本
@@ -61,6 +62,10 @@ ExplicitLM/                          # 项目根目录
 │       ├── README.md                # 实验记录系统说明文档
 │       ├── exp_001.json             # 实验001元数据记录
 │       └── ...                      # 其他实验记录
+├── cache/                           # 缓存数据（DVC追踪）
+│   ├── knowledge_cache.pt           # 知识缓存（128 MB）
+│   └── cluster_tokens_single_mapping.json  # 聚类token映射（338 MB）
+├── cache.dvc                        # cache目录DVC追踪文件
 ├── checkpoints/                     # 模型检查点（DVC追踪）
 │   ├── exp_001/                     # 实验001的模型权重
 │   ├── exp_001.dvc                  # DVC版本追踪文件
@@ -70,7 +75,7 @@ ExplicitLM/                          # 项目根目录
 │   └── ...
 ├── docs/                            # 项目文档
 │   ├── experiment_workflow.md       # 实验运行指南（DVC、训练流程）
-│   ├── dvc_implementation_plan.md   # DVC实现规划文档
+│   ├── dvc_guide.md                 # DVC数据版本管理指南（常用指令、版本记录）
 │   └── uv.md                        # uv包管理器使用指南
 ├── scripts/                         # 实用脚本
 │   ├── data_processing/             # 数据处理脚本
@@ -269,7 +274,7 @@ ExplicitLM支持为每个数据集独立指定版本，包括训练数据集（`
 
 **包管理器**：项目使用[uv](https://github.com/astral-sh/uv)作为Python包管理器。uv是一个现代化的、极快的包管理工具，比传统的pip和conda快10-100倍。项目配置在`pyproject.toml`中定义，通过`uv sync`即可安装所有依赖。详细的uv使用指南请参阅[uv使用指南](docs/uv.md)。
 
-**版本控制**：代码使用Git进行版本控制，数据和模型权重使用DVC（Data Version Control）。DVC采用与Git类似的工作流程，但专门针对大文件进行了优化。项目配置MinIO作为DVC的远程存储后端，支持团队协作和数据共享。
+**版本控制**：代码使用Git进行版本控制，数据和模型权重使用DVC（Data Version Control）。DVC采用与Git类似的工作流程，但专门针对大文件进行了优化。项目配置MinIO作为DVC的远程存储后端，支持团队协作和数据共享。所有数据集的版本信息（包括版本标识、创建日期、数据大小等）请参阅[DVC数据版本管理指南 - 数据集版本记录](docs/dvc_guide.md#二数据集版本记录)。
 
 **实验追踪**：使用SwanLab进行实验可视化和管理。SwanLab提供了丰富的指标记录、可视化、对比分析功能，支持在线和离线模式。训练过程中的所有指标（损失、学习率、验证准确率等）会自动上传到SwanLab平台。
 
@@ -331,6 +336,7 @@ rsync -avz compute-node:/path/to/ExplicitLM/checkpoints/exp_001/ ./checkpoints/e
 
 ## 主要文档
 
+- [DVC数据版本管理指南](docs/dvc_guide.md)：DVC常用指令、数据集版本记录、版本切换方法
 - [实验运行指南](docs/experiment_workflow.md)：详细介绍DVC数据管理、实验训练流程（单机/集群）、实验记录系统
 - [uv使用指南](docs/uv.md)：uv包管理器的使用方法和最佳实践
 - [实验记录说明](experiments/records/README.md)：实验记录文件的结构、查询和复现方法
