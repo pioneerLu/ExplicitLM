@@ -124,7 +124,7 @@ ExplicitLM采用基于优先级的超参数配置系统，所有超参数集中�
 
 #### SwanLab实验追踪配置
 
-集成SwanLab进行实验可视化和管理。`use_swanlab`（默认False）控制是否启用SwanLab追踪，`swanlab_online`（默认False）选择在线或离线模式，`swanlab_project`（默认"MiniMind"）设置SwanLab项目名称。启用后，训练过程中的所有指标（损失、学习率、验证准确率等）都会自动上传到SwanLab平台。
+集成SwanLab进行实验可视化和管理。`use_swanlab`（默认False）控制是否启用SwanLab追踪，`swanlab_online`（默认False）选择在线或离线模式，`swanlab_project`（默认"ExplicitLM"）设置SwanLab项目名称。启用后，训练过程中的所有指标（损失、学习率、验证准确率等）都会自动上传到SwanLab平台。
 
 #### 模型初始化配置
 
@@ -185,7 +185,7 @@ ExplicitLM采用十阶段的训练流程，完整实现在`1_pretrain.py`中。�
 
 ### 阶段五：SwanLab实验追踪配置
 
-如果启用SwanLab（`use_swanlab=True`），主进程会初始化SwanLab实验实例。系统会自动生成实验运行名称，格式为`MiniMind-Pretrain-Epoch-{epochs}-BatchSize-{batch_size}-LearningRate-{lr}`，便于在SwanLab界面中识别和对比不同实验。根据`swanlab_online`参数选择在线或离线模式，离线模式下数据会先保存在本地，等网络恢复后自动上传。所有配置参数都会自动同步到SwanLab，方便后续查询和对比。
+如果启用SwanLab（`use_swanlab=True`），主进程会初始化SwanLab实验实例。系统会自动生成实验运行名称，格式为`ExplicitLM-Pretrain-Epoch-{epochs}-BatchSize-{batch_size}-LearningRate-{lr}`，便于在SwanLab界面中识别和对比不同实验。根据`swanlab_online`参数选择在线或离线模式，离线模式下数据会先保存在本地，等网络恢复后自动上传。所有配置参数都会自动同步到SwanLab，方便后续查询和对比。
 
 ### 阶段六：模型初始化
 

@@ -1,13 +1,13 @@
 #!/bin/bash
 ################################################################################
-# 实验001: 基线实验
+# 实验001: 基线实验 - Hydra-Zen配置版
 ################################################################################
 
 # 实验ID
-EXP_ID="exp_001"
+EXP_ID="exp_001_hydra_zen"
 
 # 实验描述
-EXP_DESC="基线实验 knowledge_num=1M epochs=10"
+EXP_DESC="基线实验 Hydra-Zen配置版 knowledge_num=1M epochs=10"
 
 # 数据版本（细粒度，针对不同数据集分别指定，留空则使用当前版本）
 DATASET_VERSION=""          # 训练数据集版本 (对应 dataset_path: data/database/merged_pretrain.jsonl)
@@ -16,9 +16,10 @@ EMBEDDING_VERSION=""        # 预训练嵌入权重版本 (对应 pretrained_emb
 DATABASE_VERSION=""         # 知识库初始化数据版本 (对应 database_init_path，可选)
 CACHE_VERSION=""            # 缓存数据版本 (对应 cache_path: cache/knowledge_cache.pt，可选)
 
-# 训练参数（可以包含LMConfig的任何参数）
-TRAIN_ARGS="--epochs 1 --knowledge_num 1048576 --dim 512 --n_layers 8 --batch_size 1 --learning_rate 2e-4"
+# Hydra-Zen 配置覆盖参数（使用 key=value 格式）
+# 格式为 hydra-style overrides, e.g., "training.epochs=10 model.knowledge_num=1048576"
+TRAIN_ARGS="training.epochs=1 model.knowledge_num=1048576 model.dim=512 model.n_layers=8 training.batch_size=1 training.learning_rate=2e-4"
 
 # 调用核心运行脚本
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/_run_experiment_core.sh"
+source "${SCRIPT_DIR}/_run_experiment_core_hydra_zen.sh"

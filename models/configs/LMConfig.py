@@ -3,7 +3,7 @@ from typing import List
 
 
 class LMConfig(PretrainedConfig):
-    model_type = "minimind"
+    model_type = "ExplicitLM"
 
     def __init__(
             self,
@@ -70,7 +70,7 @@ class LMConfig(PretrainedConfig):
             ####################################################
             use_swanlab: bool = False,
             swanlab_online: bool = False,
-            swanlab_project: str = "MiniMind",
+            swanlab_project: str = "ExplicitLM",
             ####################################################
             # 模型初始化相关配置
             ####################################################

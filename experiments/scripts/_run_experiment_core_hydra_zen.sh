@@ -1,7 +1,7 @@
 #!/bin/bash
 ################################################################################
-# ExplicitLM核心实验运行脚本
-# 用途：被各实验脚本调用的核心逻辑
+# ExplicitLM核心实验运行脚本 - Hydra-Zen版
+# 用途：被各实验脚本调用的核心逻辑，使用hydra_zen配置
 #
 # 调用方式：由实验脚本source调用，需要预先定义以下变量：
 #   - EXP_ID: 实验ID
@@ -10,18 +10,18 @@
 #   - EMBEDDING_VERSION: 预训练嵌入版本（可选）
 #   - DATABASE_VERSION: 知识库初始化版本（可选）
 #   - CACHE_VERSION: 缓存数据版本（可选）
-#   - TRAIN_ARGS: 训练参数
+#   - TRAIN_ARGS: Hydra-Zen配置覆盖参数 (格式: "param=value param2=value2")
 #
 # 示例：
 #   EXP_ID="exp_001"
-#   EXP_DESC="基线实验"
+#   EXP_DESC="基线实验 Hydra-Zen配置版"
 #   DATASET_VERSION=""
 #   VAL_DATASET_VERSION=""
 #   EMBEDDING_VERSION=""
 #   DATABASE_VERSION=""
 #   CACHE_VERSION=""
-#   TRAIN_ARGS="--epochs 10 --knowledge_num 1048576"
-#   source experiments/scripts/_run_experiment_core.sh
+#   TRAIN_ARGS="training.epochs=10 model.knowledge_num=1048576"
+#   source experiments/scripts/_run_experiment_core_hydra_zen.sh
 ################################################################################
 
 set -e  # 遇到错误立即退出
@@ -68,7 +68,7 @@ if [ -z "$EXP_ID" ] || [ -z "$EXP_DESC" ] || [ -z "$TRAIN_ARGS" ]; then
     echo "  EMBEDDING_VERSION=\"预训练嵌入版本(可选)\""
     echo "  DATABASE_VERSION=\"知识库初始化版本(可选)\""
     echo "  CACHE_VERSION=\"缓存版本(可选)\""
-    echo "  TRAIN_ARGS=\"训练参数\""
+    echo "  TRAIN_ARGS=\"Hydra-Zen配置覆盖参数，格式: 'param=value param2=value2'\""
     exit 1
 fi
 
@@ -76,7 +76,7 @@ log_info "========================================="
 log_info "实验ID: $EXP_ID"
 log_info "实验描述: $EXP_DESC"
 log_info "训练数据集版本: ${DATASET_VERSION:-当前版本}"
-log_info "训练参数: $TRAIN_ARGS"
+log_info "Hydra-Zen配置覆盖: $TRAIN_ARGS"
 log_info "========================================="
 
 ################################################################################
@@ -86,7 +86,7 @@ PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 CHECKPOINT_DIR="${PROJECT_ROOT}/checkpoints/${EXP_ID}"
 RECORD_FILE="${PROJECT_ROOT}/experiments/records/${EXP_ID}.json"
 SWANLAB_URL_FILE="${PROJECT_ROOT}/.swanlab_url"
-META_FILE="${PROJECT_ROOT}/.experiment_meta"
+META_FILE="${PROJECT_ROOT}/.experiment_meta_${EXP_ID}"
 
 ################################################################################
 # 前置检查
@@ -214,7 +214,7 @@ record_pre_training_meta() {
     "id": "$EXP_ID",
     "description": "$EXP_DESC",
     "timestamp": "$TIMESTAMP",
-    "script": "run_experiment.sh"
+    "script": "run_experiment_hydra_zen.sh"
   },
   "versions": {
     "code_commit": "$CODE_COMMIT",
@@ -226,7 +226,7 @@ record_pre_training_meta() {
       "cache_commit": "${CACHE_COMMIT:-N/A}"
     }
   },
-  "command": "accelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS"
+  "command": "python 1_pretrain.py $TRAIN_ARGS"
 }
 EOF
 
@@ -242,8 +242,8 @@ run_training() {
     # 清理旧的SwanLab URL文件
     rm -f "$SWANLAB_URL_FILE"
 
-    # 构建训练命令
-    TRAIN_CMD="accelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR --use_swanlab $TRAIN_ARGS"
+    # 构建训练命令 - 使用hydra_zen格式的参数
+    TRAIN_CMD="python 1_pretrain.py $TRAIN_ARGS"
 
     log_info "执行命令: $TRAIN_CMD"
     echo ""
@@ -317,32 +317,37 @@ generate_record() {
     # 读取临时元数据
     EXPERIMENT_META=$(cat "$META_FILE")
 
-    # 提取训练参数为JSON格式
+    # Extract hyperparameters from TRAIN_ARGS (convert hydra_zen format to JSON)
     PARAMS_JSON=$(python3 -c "
 import sys, json
-args = '$TRAIN_ARGS'.split()
+import re
+
+# Parse hydra_zen style arguments (key=value format)
+args_str = '$TRAIN_ARGS'
+pairs = args_str.split()
+
 params = {}
-i = 0
-while i < len(args):
-    if args[i].startswith('--'):
-        key = args[i][2:]
-        if i + 1 < len(args) and not args[i+1].startswith('--'):
-            value = args[i+1]
-            # 尝试转换为数字
-            try:
+for pair in pairs:
+    if '=' in pair:
+        key, value = pair.split('=', 1)
+        # Try to convert to appropriate type
+        try:
+            # Check if it's a numeric value first
+            if '.' in value:
+                value = float(value)
+            else:
                 value = int(value)
-            except ValueError:
-                try:
-                    value = float(value)
-                except ValueError:
-                    pass
-            params[key] = value
-            i += 2
-        else:
-            params[key] = True
-            i += 1
-    else:
-        i += 1
+        except ValueError:
+            # Try boolean values
+            if value.lower() == 'true':
+                value = True
+            elif value.lower() == 'false':
+                value = False
+            # Keep as string otherwise
+            else:
+                pass
+        params[key] = value
+
 print(json.dumps(params, indent=2))
 " 2>/dev/null || echo "{}")
 
@@ -357,9 +362,9 @@ print(json.dumps(params, indent=2))
   "experiment": {
     "id": "$EXP_ID",
     "description": "$EXP_DESC",
-    "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-    "script": "run_experiment.sh",
-    "command": "accelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS"
+    "timestamp": "$(date -u +\"%Y-%m-%dT%H:%M:%SZ\")",
+    "script": "run_experiment_hydra_zen.sh",
+    "command": "python 1_pretrain.py $TRAIN_ARGS"
   },
   "versions": {
     "code_commit": "$CODE_COMMIT",
@@ -394,7 +399,7 @@ print(json.dumps(params, indent=2))
       "git checkout $DATABASE_COMMIT && dvc checkout data/database.dvc && git checkout -"
     ],
     "checkpoint_pull": "dvc pull ${CHECKPOINT_DVC}",
-    "full_command": "# 1. 恢复代码版本\\ngit checkout $CODE_COMMIT\\n\\n# 2. 恢复数据集版本\\ngit checkout $DATABASE_COMMIT && dvc checkout data/database.dvc && git checkout -\\n\\n# 3. 运行训练\\naccelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS"
+    "full_command": "# 1. 恢复代码版本\\\\ngit checkout $CODE_COMMIT\\\\n\\\\n# 2. 恢复数据集版本\\\\ngit checkout $DATABASE_COMMIT && dvc checkout data/database.dvc && git checkout -\\\\n\\\\n# 3. 运行训练\\\\npython 1_pretrain.py $TRAIN_ARGS"
   }
 }
 EOF
@@ -431,7 +436,7 @@ commit_all_changes() {
     log_info "Commit包含："
     log_info "  - 实验脚本 (如有新增/修改)"
     log_info "  - 记录文件: $RECORD_FILE"
-    log_info "  - DVC元文件: ${CHECKPOINT_DIR}.dvc"
+    log_info "  - DVC元文件: ${CHECKPOINT_DVC}"
     log_info "  - 其他代码变更 (如有)"
 }
 
