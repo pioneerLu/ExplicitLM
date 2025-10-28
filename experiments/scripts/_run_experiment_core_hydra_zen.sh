@@ -84,9 +84,13 @@ log_info "========================================="
 ################################################################################
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 CHECKPOINT_DIR="${PROJECT_ROOT}/checkpoints/${EXP_ID}"
-RECORD_FILE="${PROJECT_ROOT}/experiments/records/${EXP_ID}.json"
+# Use the experiment records directory initially, but will be moved to Hydra output dir later
+TEMP_RECORD_FILE="${PROJECT_ROOT}/experiments/records/${EXP_ID}.json"
 SWANLAB_URL_FILE="${PROJECT_ROOT}/.swanlab_url"
-META_FILE="${PROJECT_ROOT}/.experiment_meta_${EXP_ID}"
+META_FILE="${PROJECT_ROOT}/.experiment_meta"
+
+# Hydra output directory will be detected after training
+HYDRA_OUTPUT_DIR=""
 
 ################################################################################
 # 前置检查
@@ -107,9 +111,9 @@ check_prerequisites() {
     fi
 
     # 检查实验ID是否已存在
-    if [ -f "$RECORD_FILE" ]; then
+    if [ -f "$TEMP_RECORD_FILE" ]; then
         log_error "实验ID ${EXP_ID} 已存在！"
-        log_info "现有记录文件: $RECORD_FILE"
+        log_info "现有记录文件: $TEMP_RECORD_FILE"
         read -p "是否覆盖？(y/N): " confirm
         if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
             log_info "取消实验"
@@ -360,7 +364,7 @@ print(json.dumps(params, indent=2))
     NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo "0")
 
     # 生成完整记录文件
-    cat > "$RECORD_FILE" <<EOF
+    cat > "$TEMP_RECORD_FILE" <<EOF
 {
   "experiment": {
     "id": "$EXP_ID",
@@ -410,14 +414,37 @@ print(json.dumps(params, indent=2))
 }
 EOF
 
-    log_success "实验记录已生成: $RECORD_FILE"
+    log_success "实验记录已生成: $TEMP_RECORD_FILE"
 
     # 显示记录文件内容
     echo ""
     log_info "========== 实验记录内容 =========="
-    cat "$RECORD_FILE" | python3 -m json.tool 2>/dev/null || cat "$RECORD_FILE"
+    cat "$TEMP_RECORD_FILE" | python3 -m json.tool 2>/dev/null || cat "$TEMP_RECORD_FILE"
     log_info "=================================="
     echo ""
+}
+
+################################################################################
+# Find Hydra output directory after training
+################################################################################
+find_hydra_output_dir() {
+    log_info "步骤8.5/9: 查找Hydra输出目录..."
+
+    # Look for the most recent output directory containing .hydra folder
+    # Search in outputs directory for folders with .hydra subdirectory
+    local hydra_dirs=$(find "${PROJECT_ROOT}/outputs" -name ".hydra" -type d -printf "%h\n" 2>/dev/null | sort -r | head -n 1)
+    
+    if [ -n "$hydra_dirs" ] && [ -d "$hydra_dirs" ]; then
+        HYDRA_OUTPUT_DIR="$hydra_dirs"
+        log_success "找到Hydra输出目录: $HYDRA_OUTPUT_DIR"
+        
+        # Copy the record file to Hydra output directory
+        cp "$TEMP_RECORD_FILE" "$HYDRA_OUTPUT_DIR/experiment_record_${EXP_ID}.json"
+        log_info "实验记录已复制到: $HYDRA_OUTPUT_DIR/experiment_record_${EXP_ID}.json"
+    else
+        log_warning "未找到Hydra输出目录，使用默认目录"
+        HYDRA_OUTPUT_DIR=""
+    fi
 }
 
 ################################################################################
@@ -441,7 +468,7 @@ commit_all_changes() {
     log_success "所有变更已提交到Git"
     log_info "Commit包含："
     log_info "  - 实验脚本 (如有新增/修改)"
-    log_info "  - 记录文件: $RECORD_FILE"
+    log_info "  - 记录文件: $TEMP_RECORD_FILE"
     log_info "  - DVC元文件: ${CHECKPOINT_DVC}"
     log_info "  - 其他代码变更 (如有)"
 }
@@ -465,7 +492,10 @@ print_summary() {
     log_success "   实验 ${EXP_ID} 执行完成！"
     log_success "========================================="
     echo ""
-    log_info "📋 记录文件: $RECORD_FILE"
+    log_info "📋 记录文件 (默认): $TEMP_RECORD_FILE"
+    if [ -n "$HYDRA_OUTPUT_DIR" ]; then
+        log_info "📋 记录文件 (Hydra): $HYDRA_OUTPUT_DIR/experiment_record_${EXP_ID}.json"
+    fi
     log_info "🔬 SwanLab URL: $SWANLAB_URL"
     log_info "💾 Checkpoint: $CHECKPOINT_DIR"
     log_info "🏷️  代码版本: ${CODE_COMMIT:0:8}"
@@ -492,6 +522,7 @@ main() {
     get_swanlab_url
     track_checkpoint
     generate_record
+    find_hydra_output_dir
     commit_all_changes
     cleanup
     print_summary
