@@ -194,9 +194,9 @@ sync_data() {
     sync_dataset "benchmarks" "$VAL_DATASET_VERSION"   # data/benchmarks.dvc (验证数据集)
 
     # 可选数据集（仅在项目使用且指定了版本时同步）
-    [ -n "$EMBEDDING_VERSION" ] && sync_dataset "embeddings" "$EMBEDDING_VERSION"      # data/embeddings.dvc (如果存在)
-    [ -n "$DATABASE_VERSION" ] && sync_dataset "database_init" "$DATABASE_VERSION"    # data/database_init.dvc (如果存在)
-    [ -n "$CACHE_VERSION" ] && sync_dataset "cache" "$CACHE_VERSION"                   # cache.dvc (如果存在)
+    [ -n "$EMBEDDING_VERSION" ] && [ -f "data/embeddings.dvc" ] && sync_dataset "embeddings" "$EMBEDDING_VERSION"      # data/embeddings.dvc (如果存在)
+    [ -n "$DATABASE_VERSION" ] && [ -f "data/database_init.dvc" ] && sync_dataset "database_init" "$DATABASE_VERSION"    # data/database_init.dvc (如果存在)
+    [ -n "$CACHE_VERSION" ] && [ -f "${PROJECT_ROOT}/cache.dvc" ] && sync_dataset "cache" "$CACHE_VERSION"                   # cache.dvc (如果存在)
 
     log_success "数据集同步完成"
     log_info "  - Database (训练数据): ${DATABASE_COMMIT:0:8}"
@@ -284,10 +284,10 @@ get_swanlab_url() {
 }
 
 ################################################################################
-# 追踪模型权重
+# 追踪模型权重和Hydra输出目录
 ################################################################################
 track_checkpoint() {
-    log_info "步骤7/9: 追踪模型权重到DVC..."
+    log_info "步骤7/9: 追踪模型权重和Hydra输出到DVC..."
 
     # 检查checkpoint目录
     if [ ! -d "$CHECKPOINT_DIR" ]; then
@@ -299,19 +299,40 @@ track_checkpoint() {
     log_info "生成的checkpoint文件:"
     ls -lh "$CHECKPOINT_DIR"
 
-    # DVC追踪
+    # DVC追踪checkpoint
     dvc add "$CHECKPOINT_DIR"
 
-    # 获取DVC文件路径
+    # 获取DVC文件路径 for checkpoint
     CHECKPOINT_DVC="${CHECKPOINT_DIR}.dvc"
 
     # 读取DVC文件的MD5哈希（作为权重版本标识）
     if [ -f "$CHECKPOINT_DVC" ]; then
         CHECKPOINT_HASH=$(grep "md5:" "$CHECKPOINT_DVC" | awk '{print $2}')
-        log_success "DVC追踪完成 (Hash: ${CHECKPOINT_HASH:0:8})"
+        log_info "Checkpoint DVC追踪完成 (Hash: ${CHECKPOINT_HASH:0:8})"
     else
-        log_error "DVC文件生成失败: $CHECKPOINT_DVC"
+        log_error "Checkpoint DVC文件生成失败: $CHECKPOINT_DVC"
         exit 1
+    fi
+
+    # 如果Hydra输出目录存在，也进行DVC追踪
+    if [ -n "$HYDRA_OUTPUT_DIR" ] && [ -d "$HYDRA_OUTPUT_DIR" ]; then
+        log_info "Hydra输出目录内容:"
+        ls -la "$HYDRA_OUTPUT_DIR"
+        
+        # DVC追踪Hydra输出目录 (excluding the checkpoint dvc file which is tracked separately)
+        dvc add "$HYDRA_OUTPUT_DIR"
+        
+        # Get DVC file path for Hydra output
+        HYDRA_OUTPUT_DVC="${HYDRA_OUTPUT_DIR}.dvc"
+        
+        if [ -f "$HYDRA_OUTPUT_DVC" ]; then
+            HYDRA_OUTPUT_HASH=$(grep "md5:" "$HYDRA_OUTPUT_DVC" | awk '{print $2}')
+            log_success "Hydra输出DVC追踪完成 (Hash: ${HYDRA_OUTPUT_HASH:0:8})"
+        else
+            log_warning "Hydra输出DVC文件生成失败 (可能目录为空或无变化): $HYDRA_OUTPUT_DVC"
+        fi
+    else
+        log_info "Hydra输出目录不存在或未设置，跳过追踪"
     fi
 }
 
@@ -469,7 +490,10 @@ commit_all_changes() {
     log_info "Commit包含："
     log_info "  - 实验脚本 (如有新增/修改)"
     log_info "  - 记录文件: $TEMP_RECORD_FILE"
-    log_info "  - DVC元文件: ${CHECKPOINT_DVC}"
+    log_info "  - 检查点DVC元文件: ${CHECKPOINT_DVC}"
+    if [ -n "$HYDRA_OUTPUT_DIR" ] && [ -f "${HYDRA_OUTPUT_DIR}.dvc" ]; then
+        log_info "  - Hydra输出DVC元文件: ${HYDRA_OUTPUT_DIR}.dvc"
+    fi
     log_info "  - 其他代码变更 (如有)"
 }
 
@@ -506,6 +530,9 @@ print_summary() {
     echo "  1. 恢复代码: git checkout $CODE_COMMIT"
     echo "  2. 恢复数据: 使用记录文件中的data_checkout_steps"
     echo "  3. 拉取权重: dvc pull ${CHECKPOINT_DVC}"
+    if [ -n "$HYDRA_OUTPUT_DIR" ] && [ -f "${HYDRA_OUTPUT_DIR}.dvc" ]; then
+        echo "  4. 拉取Hydra输出: dvc pull ${HYDRA_OUTPUT_DIR}.dvc"
+    fi
     echo ""
     log_success "========================================="
 }
