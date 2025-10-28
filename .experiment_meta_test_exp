@@ -1,0 +1,19 @@
+{
+  "experiment": {
+    "id": "test_exp",
+    "description": "Test experiment",
+    "timestamp": "2025-10-28T13:09:29Z",
+    "script": "run_experiment_hydra_zen.sh"
+  },
+  "versions": {
+    "code_commit": "c5bc7961b359dd308b34d30d24ab6da6b962fa60",
+    "data": {
+      "dataset_commit": "28065662dcc2fbccfb47ada4147452adeb00d905",
+      "val_dataset_commit": "",
+      "embedding_commit": "N/A",
+      "database_init_commit": "N/A",
+      "cache_commit": "N/A"
+    }
+  },
+  "command": "python 1_pretrain.py training.epochs=1 model.knowledge_num=1024"
+}
