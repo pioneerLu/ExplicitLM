@@ -284,10 +284,10 @@ get_swanlab_url() {
 }
 
 ################################################################################
-# 追踪模型权重和Hydra输出目录
+# 追踪模型权重
 ################################################################################
 track_checkpoint() {
-    log_info "步骤7/9: 追踪模型权重和Hydra输出到DVC..."
+    log_info "步骤7/9: 追踪模型权重到DVC..."
 
     # 检查checkpoint目录
     if [ ! -d "$CHECKPOINT_DIR" ]; then
@@ -299,40 +299,19 @@ track_checkpoint() {
     log_info "生成的checkpoint文件:"
     ls -lh "$CHECKPOINT_DIR"
 
-    # DVC追踪checkpoint
+    # DVC追踪
     dvc add "$CHECKPOINT_DIR"
 
-    # 获取DVC文件路径 for checkpoint
+    # 获取DVC文件路径
     CHECKPOINT_DVC="${CHECKPOINT_DIR}.dvc"
 
     # 读取DVC文件的MD5哈希（作为权重版本标识）
     if [ -f "$CHECKPOINT_DVC" ]; then
         CHECKPOINT_HASH=$(grep "md5:" "$CHECKPOINT_DVC" | awk '{print $2}')
-        log_info "Checkpoint DVC追踪完成 (Hash: ${CHECKPOINT_HASH:0:8})"
+        log_success "DVC追踪完成 (Hash: ${CHECKPOINT_HASH:0:8})"
     else
-        log_error "Checkpoint DVC文件生成失败: $CHECKPOINT_DVC"
+        log_error "DVC文件生成失败: $CHECKPOINT_DVC"
         exit 1
-    fi
-
-    # 如果Hydra输出目录存在，也进行DVC追踪
-    if [ -n "$HYDRA_OUTPUT_DIR" ] && [ -d "$HYDRA_OUTPUT_DIR" ]; then
-        log_info "Hydra输出目录内容:"
-        ls -la "$HYDRA_OUTPUT_DIR"
-        
-        # DVC追踪Hydra输出目录 (excluding the checkpoint dvc file which is tracked separately)
-        dvc add "$HYDRA_OUTPUT_DIR"
-        
-        # Get DVC file path for Hydra output
-        HYDRA_OUTPUT_DVC="${HYDRA_OUTPUT_DIR}.dvc"
-        
-        if [ -f "$HYDRA_OUTPUT_DVC" ]; then
-            HYDRA_OUTPUT_HASH=$(grep "md5:" "$HYDRA_OUTPUT_DVC" | awk '{print $2}')
-            log_success "Hydra输出DVC追踪完成 (Hash: ${HYDRA_OUTPUT_HASH:0:8})"
-        else
-            log_warning "Hydra输出DVC文件生成失败 (可能目录为空或无变化): $HYDRA_OUTPUT_DVC"
-        fi
-    else
-        log_info "Hydra输出目录不存在或未设置，跳过追踪"
     fi
 }
 
@@ -462,9 +441,38 @@ find_hydra_output_dir() {
         # Copy the record file to Hydra output directory
         cp "$TEMP_RECORD_FILE" "$HYDRA_OUTPUT_DIR/experiment_record_${EXP_ID}.json"
         log_info "实验记录已复制到: $HYDRA_OUTPUT_DIR/experiment_record_${EXP_ID}.json"
+        
+        # Track Hydra output directory to DVC
+        track_hydra_output
     else
         log_warning "未找到Hydra输出目录，使用默认目录"
         HYDRA_OUTPUT_DIR=""
+    fi
+}
+
+################################################################################
+# 追踪Hydra输出目录
+################################################################################
+track_hydra_output() {
+    if [ -n "$HYDRA_OUTPUT_DIR" ] && [ -d "$HYDRA_OUTPUT_DIR" ]; then
+        log_info "步骤8.6/9: 追踪Hydra输出目录到DVC..."
+        log_info "Hydra输出目录内容:"
+        ls -la "$HYDRA_OUTPUT_DIR"
+        
+        # DVC追踪Hydra输出目录
+        dvc add "$HYDRA_OUTPUT_DIR"
+        
+        # Get DVC file path for Hydra output
+        HYDRA_OUTPUT_DVC="${HYDRA_OUTPUT_DIR}.dvc"
+        
+        if [ -f "$HYDRA_OUTPUT_DVC" ]; then
+            HYDRA_OUTPUT_HASH=$(grep "md5:" "$HYDRA_OUTPUT_DVC" | awk '{print $2}')
+            log_success "Hydra输出DVC追踪完成 (Hash: ${HYDRA_OUTPUT_HASH:0:8})"
+        else
+            log_warning "Hydra输出DVC文件生成失败 (可能目录为空或无变化): $HYDRA_OUTPUT_DVC"
+        fi
+    else
+        log_info "Hydra输出目录不存在，跳过追踪"
     fi
 }
 
