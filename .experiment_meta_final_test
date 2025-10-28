@@ -1,12 +1,12 @@
 {
   "experiment": {
-    "id": "test_val",
-    "description": "Test val dataset",
-    "timestamp": "2025-10-28T13:17:07Z",
+    "id": "final_test",
+    "description": "Final test of fixed script",
+    "timestamp": "2025-10-28T13:33:30Z",
     "script": "run_experiment_hydra_zen.sh"
   },
   "versions": {
-    "code_commit": "28006000b9451f9bc47495f2716973ee168daceb",
+    "code_commit": "f770a72ceab2ed97643eb95ebf7fe482acab3c1e",
     "data": {
       "dataset_commit": "28065662dcc2fbccfb47ada4147452adeb00d905",
       "val_dataset_commit": "cd7f9bb784c5dbfabf8193cbca40d66d99e3ba09",
@@ -15,5 +15,5 @@
       "cache_commit": "N/A"
     }
   },
-  "command": "python 1_pretrain.py training.epochs=1"
+  "command": "python 1_pretrain.py training.epochs=1 model.knowledge_num=512"
 }

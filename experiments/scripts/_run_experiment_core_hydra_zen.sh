@@ -223,7 +223,7 @@ record_pre_training_meta() {
     "code_commit": "$CODE_COMMIT",
     "data": {
       "dataset_commit": "$DATABASE_COMMIT",
-      "val_dataset_commit": "$BENCHMARKS_COMMIT",
+      "val_dataset_commit": "${BENCHMARKS_COMMIT:-N/A}",
       "embedding_commit": "${EMBEDDINGS_COMMIT:-N/A}",
       "database_init_commit": "${DATABASE_INIT_COMMIT:-N/A}",
       "cache_commit": "${CACHE_COMMIT:-N/A}"
@@ -375,6 +375,8 @@ print(json.dumps(params, indent=2))
     "data": {
       "dataset_commit": "$DATABASE_COMMIT",
       "dataset_commit_short": "${DATABASE_COMMIT:0:8}",
+      "val_dataset_commit": "${BENCHMARKS_COMMIT:-N/A}",
+      "val_dataset_commit_short": "${BENCHMARKS_COMMIT:0:8}",
       "embedding_commit": "${EMBEDDINGS_COMMIT:-N/A}",
       "embedding_commit_short": "${EMBEDDINGS_COMMIT:0:8}",
       "database_init_commit": "${DATABASE_INIT_COMMIT:-N/A}",
@@ -399,10 +401,11 @@ print(json.dumps(params, indent=2))
   "reproduction": {
     "code_checkout": "git checkout $CODE_COMMIT",
     "data_checkout_steps": [
-      "git checkout $DATABASE_COMMIT && dvc checkout data/database.dvc && git checkout -"
+      "git checkout $DATABASE_COMMIT && dvc checkout data/database.dvc && git checkout -",
+      "git checkout $BENCHMARKS_COMMIT && dvc checkout data/benchmarks.dvc && git checkout -"
     ],
     "checkpoint_pull": "dvc pull ${CHECKPOINT_DVC}",
-    "full_command": "# 1. 恢复代码版本\\\\ngit checkout $CODE_COMMIT\\\\n\\\\n# 2. 恢复数据集版本\\\\ngit checkout $DATABASE_COMMIT && dvc checkout data/database.dvc && git checkout -\\\\n\\\\n# 3. 运行训练\\\\npython 1_pretrain.py $TRAIN_ARGS"
+    "full_command": "# 1. 恢复代码版本\\\\ngit checkout $CODE_COMMIT\\\\n\\\\n# 2. 恢复数据集版本\\\\ngit checkout $DATABASE_COMMIT && dvc checkout data/database.dvc && git checkout -\\\\n\\\\n# 3. 恢复验证数据集版本\\\\ngit checkout $BENCHMARKS_COMMIT && dvc checkout data/benchmarks.dvc && git checkout -\\\\n\\\\n# 4. 运行训练\\\\npython 1_pretrain.py $TRAIN_ARGS"
   }
 }
 EOF
