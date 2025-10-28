@@ -42,7 +42,9 @@ uv.lock
 # SwanLab日志
 swanlog/
 wandb/
-outputs/
+/outputs/*
+!/outputs/.gitkeep
+!/outputs/*.dvc
 
 # 临时文件
 .swanlab_url
@@ -61,3 +63,4 @@ outputs/
 # secrets.yaml
 **/CLAUDE.md
 /cache
+/outputs
