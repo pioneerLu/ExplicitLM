@@ -185,6 +185,9 @@ sync_data() {
 
     # 同步训练数据集
     sync_dataset "database" "$DATASET_VERSION"         # data/database.dvc (训练数据集)
+    
+    # 同步验证数据集
+    sync_dataset "benchmarks" "$VAL_DATASET_VERSION"   # data/benchmarks.dvc (验证数据集)
 
     # 可选数据集（仅在项目使用且指定了版本时同步）
     [ -n "$EMBEDDING_VERSION" ] && sync_dataset "embeddings" "$EMBEDDING_VERSION"      # data/embeddings.dvc (如果存在)
