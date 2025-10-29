@@ -90,9 +90,9 @@ else
 fi
 
 ################################################################################
-# 步骤3: 追踪checkpoint到DVC
+# 步骤3: 验证checkpoint目录
 ################################################################################
-log_info "步骤3/5: 追踪checkpoint到DVC..."
+log_info "步骤3/6: 验证checkpoint目录..."
 
 if [ ! -d "$CHECKPOINT_DIR" ]; then
     log_error "Checkpoint目录不存在: $CHECKPOINT_DIR"
@@ -103,23 +103,72 @@ fi
 log_info "Checkpoint文件:"
 ls -lh "$CHECKPOINT_DIR"
 
-# DVC追踪
-dvc add "$CHECKPOINT_DIR"
-
-CHECKPOINT_DVC="${CHECKPOINT_DIR}.dvc"
-
-if [ -f "$CHECKPOINT_DVC" ]; then
-    CHECKPOINT_HASH=$(grep "md5:" "$CHECKPOINT_DVC" | awk '{print $2}')
-    log_success "DVC追踪完成 (Hash: ${CHECKPOINT_HASH:0:8})"
-else
-    log_error "DVC文件生成失败: $CHECKPOINT_DVC"
-    exit 1
-fi
+# 跳过checkpoint的单独DVC追踪，因为整个outputs目录已被DVC管理
+log_info "跳过checkpoint的DVC追踪（整个outputs目录已被DVC管理）"
+CHECKPOINT_DVC=""
+CHECKPOINT_HASH="outputs_managed"
 
 ################################################################################
-# 步骤4: 生成实验记录文件
+# Find Hydra output directory after training
 ################################################################################
-log_info "步骤4/5: 生成实验记录文件..."
+find_hydra_output_dir() {
+    log_info "步骤4.5/6: 查找Hydra输出目录..."
+
+    # Look for the most recent output directory containing .hydra folder
+    # Search in outputs directory for folders with .hydra subdirectory
+    local hydra_dirs=$(find "${PROJECT_ROOT}/outputs" -name ".hydra" -type d -printf "%h\n" 2>/dev/null | sort -r | head -n 1)
+
+    if [ -n "$hydra_dirs" ] && [ -d "$hydra_dirs" ]; then
+        HYDRA_OUTPUT_DIR="$hydra_dirs"
+        log_success "找到Hydra输出目录: $HYDRA_OUTPUT_DIR"
+
+        # Copy the record file to Hydra output directory
+        if [ -f "$RECORD_FILE" ]; then
+            cp "$RECORD_FILE" "$HYDRA_OUTPUT_DIR/experiment_record_${EXP_ID}.json"
+            log_info "实验记录已复制到: $HYDRA_OUTPUT_DIR/experiment_record_${EXP_ID}.json"
+        fi
+
+        # Track Hydra output directory to DVC
+        track_hydra_output
+    else
+        log_warning "未找到Hydra输出目录，使用默认目录"
+        HYDRA_OUTPUT_DIR=""
+    fi
+}
+
+################################################################################
+# 追踪Hydra输出目录
+################################################################################
+track_hydra_output() {
+    if [ -n "$HYDRA_OUTPUT_DIR" ] && [ -d "$HYDRA_OUTPUT_DIR" ]; then
+        log_info "步骤4.6/6: 追踪Hydra输出目录到DVC..."
+        log_info "Hydra输出目录内容:"
+        ls -la "$HYDRA_OUTPUT_DIR"
+
+        # DVC追踪Hydra输出目录
+        dvc add "$HYDRA_OUTPUT_DIR"
+
+        # Get DVC file path for Hydra output
+        HYDRA_OUTPUT_DVC="${HYDRA_OUTPUT_DIR}.dvc"
+
+        if [ -f "$HYDRA_OUTPUT_DVC" ]; then
+            HYDRA_OUTPUT_HASH=$(grep "md5:" "$HYDRA_OUTPUT_DVC" | awk '{print $2}')
+            log_success "Hydra输出DVC追踪完成 (Hash: ${HYDRA_OUTPUT_HASH:0:8})"
+        else
+            log_warning "Hydra输出DVC文件生成失败 (可能目录为空或无变化): $HYDRA_OUTPUT_DVC"
+        fi
+    else
+        log_info "Hydra输出目录不存在，跳过追踪"
+    fi
+}
+
+################################################################################
+# 步骤5: 生成实验记录文件
+################################################################################
+# Find and track Hydra output directory
+find_hydra_output_dir
+
+log_info "步骤5/6: 生成实验记录文件..."
 
 # 提取训练参数为JSON with better error handling
 if command -v python3 >/dev/null 2>&1; then
@@ -211,9 +260,17 @@ cat > "$RECORD_FILE" <<EOF
       "cache_commit": "${CACHE_COMMIT:-N/A}",
       "cache_commit_short": "${CACHE_COMMIT:0:8}"
     },
-    "checkpoint_dvc": "$CHECKPOINT_DVC",
-    "checkpoint_hash": "$CHECKPOINT_HASH",
-    "checkpoint_hash_short": "${CHECKPOINT_HASH:0:8}"
+    "checkpoint_info": {
+      "checkpoint_dir": "$CHECKPOINT_DIR",
+      "dvc_managed": "true",
+      "note": "整个outputs目录已被DVC管理，跳过单独追踪"
+    },
+    "hydra_output": {
+      "hydra_output_dir": "${HYDRA_OUTPUT_DIR:-N/A}",
+      "hydra_output_dvc": "${HYDRA_OUTPUT_DVC:-N/A}",
+      "hydra_output_hash": "${HYDRA_OUTPUT_HASH:-N/A}",
+      "hydra_output_hash_short": "${HYDRA_OUTPUT_HASH:0:8}"
+    }
   },
   "hyperparameters": $PARAMS_JSON,
   "results": {
@@ -231,8 +288,9 @@ cat > "$RECORD_FILE" <<EOF
       "git checkout $DATABASE_COMMIT && dvc checkout data/database.dvc && git checkout -",
       "git checkout $BENCHMARKS_COMMIT && dvc checkout data/benchmarks.dvc && git checkout -"
     ],
-    "checkpoint_pull": "dvc pull ${CHECKPOINT_DVC}",
-    "full_command": "# 1. 恢复代码版本\\ngit checkout $CODE_COMMIT\\n\\n# 2. 恢复各数据集版本\\ngit checkout $DATABASE_COMMIT && dvc checkout data/database.dvc && git checkout -\\ngit checkout $BENCHMARKS_COMMIT && dvc checkout data/benchmarks.dvc && git checkout -\\n\\n# 3. 运行训练\\naccelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS"
+    "checkpoint_pull": "dvc pull outputs (整个outputs目录包含checkpoint)",
+    "hydra_output_pull": "${HYDRA_OUTPUT_DVC:+dvc pull ${HYDRA_OUTPUT_DVC}}",
+    "full_command": "# 1. 恢复代码版本\\ngit checkout $CODE_COMMIT\\n\\n# 2. 恢复各数据集版本\\ngit checkout $DATABASE_COMMIT && dvc checkout data/database.dvc && git checkout -\\ngit checkout $BENCHMARKS_COMMIT && dvc checkout data/benchmarks.dvc && git checkout -\\n\\n# 3. 拉取输出目录\\ndvc pull outputs\\n\\n# 4. 运行训练\\naccelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS"
   }
 }
 EOF
@@ -251,9 +309,9 @@ log_info "=================================="
 echo ""
 
 ################################################################################
-# 步骤5: Git提交所有变更
+# 步骤6: Git提交所有变更
 ################################################################################
-log_info "步骤5/5: 提交到Git..."
+log_info "步骤6/6: 提交到Git..."
 
 echo ""
 log_info "将要提交的变更："
@@ -267,6 +325,13 @@ fi
 if git add -A 2>/dev/null; then
     if git commit -m "exp: ${EXP_ID} - ${EXP_DESC}" 2>/dev/null; then
         log_success "所有变更已提交到Git"
+        log_info "Commit包含："
+        log_info "  - 实验记录文件: $RECORD_FILE"
+        log_info "  - Checkpoint目录: $CHECKPOINT_DIR (已包含在outputs目录的DVC管理中)"
+        if [ -n "$HYDRA_OUTPUT_DIR" ] && [ -f "${HYDRA_OUTPUT_DIR}.dvc" ]; then
+            log_info "  - Hydra输出DVC元文件: ${HYDRA_OUTPUT_DIR}.dvc"
+        fi
+        log_info "  - 其他代码变更 (如有)"
     else
         log_error "Git提交失败"
         exit 1
@@ -294,11 +359,17 @@ log_success "   实验 ${EXP_ID} 全部完成！"
 log_success "========================================="
 echo ""
 log_info "📋 记录文件: $RECORD_FILE"
+if [ -n "$HYDRA_OUTPUT_DIR" ]; then
+    log_info "📋 记录文件 (Hydra): $HYDRA_OUTPUT_DIR/experiment_record_${EXP_ID}.json"
+fi
 log_info "🔬 SwanLab URL: $SWANLAB_URL"
 log_info "💾 Checkpoint: $CHECKPOINT_DIR"
 log_info "🏷️  代码版本: ${CODE_COMMIT:0:8}"
 log_info "📊 数据版本: ${DATABASE_COMMIT:0:8}"
-log_info "🔐 权重哈希: ${CHECKPOINT_HASH:0:8}"
+log_info "📝 Checkpoint已包含在outputs目录的DVC管理中"
+if [ -n "$HYDRA_OUTPUT_HASH" ]; then
+    log_info "📦 Hydra输出哈希: ${HYDRA_OUTPUT_HASH:0:8}"
+fi
 echo ""
 log_info "复现命令详见: $RECORD_FILE (reproduction字段)"
 echo ""

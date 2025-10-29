@@ -45,15 +45,21 @@ if [ -z "$EXP_ID" ] || [ -z "$EXP_DESC" ] || [ -z "$TRAIN_ARGS" ]; then
     exit 1
 fi
 
+# 路径定义
+PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+
+# 生成基于登录节点时间的CHECKPOINT_DIR
+CURRENT_DATE=$(date '+%Y-%m-%d')
+CURRENT_TIME=$(date '+H-%M-%S')
+CHECKPOINT_DIR="${PROJECT_ROOT}/outputs/${CURRENT_DATE}/${CURRENT_TIME}"
+
 log_info "========================================="
 log_info "【集群模式 - 前置阶段】"
 log_info "实验ID: $EXP_ID"
 log_info "实验描述: $EXP_DESC"
+log_info "输出目录: $CHECKPOINT_DIR"
 log_info "========================================="
 
-# 路径定义
-PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-CHECKPOINT_DIR="${PROJECT_ROOT}/checkpoints/${EXP_ID}"
 RECORD_FILE="${PROJECT_ROOT}/experiments/records/${EXP_ID}.json"
 META_FILE="${PROJECT_ROOT}/.experiment_meta_${EXP_ID}"
 STATE_FILE="${PROJECT_ROOT}/.cluster_state_${EXP_ID}"
@@ -85,6 +91,7 @@ fi
 
 mkdir -p "${PROJECT_ROOT}/experiments/records"
 mkdir -p "$CHECKPOINT_DIR"
+log_info "输出目录: $CHECKPOINT_DIR"
 
 log_success "前置检查通过"
 
@@ -207,9 +214,56 @@ fi
 log_success "数据同步完成"
 
 ################################################################################
-# 步骤4: 记录实验元数据
+# 处理Hydra输出路径重载
 ################################################################################
-log_info "步骤4/5: 记录实验元数据..."
+process_hydra_output_args() {
+    log_info "步骤4/5: 处理Hydra输出路径..."
+
+    # 检查TRAIN_ARGS中是否已包含输出相关参数
+    local has_output_dir=false
+    local has_hydra_output=false
+
+    # 检查常见的输出目录参数
+    if echo "$TRAIN_ARGS" | grep -q -E "(--out_dir|output_dir|hydra\.run\.dir)"; then
+        has_output_dir=true
+        log_info "  检测到现有输出参数，将保留原有配置"
+    fi
+
+    # 检查是否包含hydra相关参数
+    if echo "$TRAIN_ARGS" | grep -q -E "(hydra\.|hydra_)"; then
+        has_hydra=true
+        log_info "  检测到Hydra配置参数"
+    fi
+
+    # 构建最终的训练参数
+    FINAL_TRAIN_ARGS="$TRAIN_ARGS"
+
+    # 如果没有输出目录参数，添加Hydra输出配置
+    if [ "$has_output_dir" = false ]; then
+        if [ "$has_hydra" = true ]; then
+            # 为Hydra配置添加输出目录重载
+            FINAL_TRAIN_ARGS="$FINAL_TRAIN_ARGS hydra.job.chdir=False hydra.run.dir=$CHECKPOINT_DIR"
+            log_info "  添加Hydra输出目录重载: $CHECKPOINT_DIR"
+        else
+            # 传统配置，保持原有的--out_dir方式
+            FINAL_TRAIN_ARGS="--out_dir $CHECKPOINT_DIR $FINAL_TRAIN_ARGS"
+            log_info "  添加传统输出目录: $CHECKPOINT_DIR"
+        fi
+    fi
+
+    # 生成最终命令
+    FINAL_COMMAND="accelerate launch 1_pretrain.py $FINAL_TRAIN_ARGS"
+    log_success "训练参数处理完成"
+    log_info "最终命令: $FINAL_COMMAND"
+}
+
+################################################################################
+# 步骤5: 记录实验元数据
+################################################################################
+log_info "步骤5/6: 记录实验元数据..."
+
+# 处理Hydra输出参数
+process_hydra_output_args
 
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
@@ -218,7 +272,8 @@ cat > "$META_FILE" <<EOF
   "experiment": {
     "id": "$EXP_ID",
     "description": "$EXP_DESC",
-    "timestamp": "$TIMESTAMP"
+    "timestamp": "$TIMESTAMP",
+    "mode": "cluster_pre"
   },
   "versions": {
     "code_commit": "$CODE_COMMIT",
@@ -230,16 +285,21 @@ cat > "$META_FILE" <<EOF
       "cache_commit": "${CACHE_COMMIT:-N/A}"
     }
   },
-  "command": "accelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS"
+  "training": {
+    "original_args": "$TRAIN_ARGS",
+    "final_args": "$FINAL_TRAIN_ARGS",
+    "output_dir": "$CHECKPOINT_DIR",
+    "command": "$FINAL_COMMAND"
+  }
 }
 EOF
 
 log_success "元数据已记录: $META_FILE"
 
 ################################################################################
-# 步骤5: 保存状态供后续阶段使用
+# 步骤6: 保存状态供后续阶段使用
 ################################################################################
-log_info "步骤5/5: 保存状态信息..."
+log_info "步骤6/6: 保存状态信息..."
 
 cat > "$STATE_FILE" <<EOF
 # 集群实验状态文件 - ${EXP_ID}
@@ -249,6 +309,10 @@ cat > "$STATE_FILE" <<EOF
 export EXP_ID="$EXP_ID"
 export EXP_DESC="$EXP_DESC"
 export TRAIN_ARGS="$TRAIN_ARGS"
+
+# 处理后的训练参数
+export FINAL_TRAIN_ARGS="$FINAL_TRAIN_ARGS"
+export FINAL_COMMAND="$FINAL_COMMAND"
 
 # 版本信息
 export CODE_COMMIT="$CODE_COMMIT"
@@ -273,9 +337,14 @@ log_success "========================================="
 log_success "   前置阶段完成！"
 log_success "========================================="
 echo ""
+log_info "📋 训练配置："
+log_info "  原始参数: $TRAIN_ARGS"
+log_info "  最终参数: $FINAL_TRAIN_ARGS"
+log_info "  输出目录: $CHECKPOINT_DIR"
+log_info ""
 log_info "📋 下一步操作："
 log_info "1. 将代码和数据同步到计算节点（如需要）"
-log_info "2. 在计算节点运行训练脚本："
-log_info "   source ${PROJECT_ROOT}/experiments/scripts/${EXP_ID}_train.sh"
+log_info "2. 在计算节点运行训练命令："
+log_info "   $FINAL_COMMAND"
 echo ""
 log_info "📝 状态文件已保存，供训练和后续阶段使用"

@@ -83,10 +83,10 @@ log_info "========================================="
 # 目录和文件路径定义
 ################################################################################
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-# Initially set to a default, but will be updated to Hydra's out directory after training
-CHECKPOINT_DIR="${PROJECT_ROOT}/outputs/checkpoints/${EXP_ID}"
-# Use the experiment records directory initially, but will be moved to Hydra output dir later
-TEMP_RECORD_FILE="${PROJECT_ROOT}/experiments/records/${EXP_ID}.json"
+# Will be updated to Hydra's out directory after training
+CHECKPOINT_DIR=""
+# Use the Hydra output directory for the record file
+TEMP_RECORD_FILE=""
 SWANLAB_URL_FILE="${PROJECT_ROOT}/.swanlab_url"
 META_FILE="${PROJECT_ROOT}/.experiment_meta"
 
@@ -111,20 +111,11 @@ check_prerequisites() {
         exit 1
     fi
 
-    # 检查实验ID是否已存在
-    if [ -f "$TEMP_RECORD_FILE" ]; then
-        log_error "实验ID ${EXP_ID} 已存在！"
-        log_info "现有记录文件: $TEMP_RECORD_FILE"
-        read -p "是否覆盖？(y/N): " confirm
-        if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
-            log_info "取消实验"
-            exit 0
-        fi
-    fi
+    # 检查实验ID是否已存在 (in Hydra output directories)
+    # Note: We're not checking for existing records in the records directory anymore
 
-    # 创建必要目录
-    mkdir -p "${PROJECT_ROOT}/experiments/records"
-    mkdir -p "$CHECKPOINT_DIR"
+    # 创建 necessary directories (excluding records)
+    mkdir -p "${PROJECT_ROOT}/experiments"
 
     log_success "前置检查通过"
 }
@@ -292,20 +283,17 @@ track_checkpoint() {
 
     # Check if Hydra output directory exists (search for most recent)
     local hydra_out_dir=$(find "${PROJECT_ROOT}/outputs" -name ".hydra" -type d -printf "%h\n" 2>/dev/null | sort -r | head -n 1)
-    
-    # Default to initially defined checkpoint directory
-    TARGET_CHECKPOINT_DIR="$CHECKPOINT_DIR"
-    
-    # If Hydra output directory with 'out' subdirectory exists and has content, use that instead
+
+    # Use Hydra output directory
+    TARGET_CHECKPOINT_DIR=""
+
+    # If Hydra output directory with 'out' subdirectory exists and has content, use that
     if [ -n "$hydra_out_dir" ] && [ -d "$hydra_out_dir/out" ] && [ "$(ls -A "$hydra_out_dir/out" 2>/dev/null)" ]; then
         TARGET_CHECKPOINT_DIR="$hydra_out_dir/out"
         log_info "发现Hydra输出目录，将追踪: $TARGET_CHECKPOINT_DIR"
-    elif [ ! -d "$CHECKPOINT_DIR" ] || [ ! "$(ls -A "$CHECKPOINT_DIR" 2>/dev/null)" ]; then
-        # If initially defined directory doesn't exist or is empty, try to find Hydra output
-        if [ -n "$hydra_out_dir" ] && [ -d "$hydra_out_dir/out" ]; then
-            TARGET_CHECKPOINT_DIR="$hydra_out_dir/out"
-            log_info "初始checkpoint目录为空或不存在，使用Hydra输出: $TARGET_CHECKPOINT_DIR"
-        fi
+    else
+        log_error "未找到Hydra输出目录或checkpoint目录为空"
+        exit 1
     fi
 
     # 检查checkpoint目录
@@ -396,9 +384,6 @@ track_checkpoint() {
 generate_record() {
     log_info "步骤8/9: 生成实验记录文件..."
 
-    # 读取临时元数据
-    EXPERIMENT_META=$(cat "$META_FILE")
-
     # Extract hyperparameters from TRAIN_ARGS (convert hydra_zen format to JSON)
     PARAMS_JSON=$(python3 -c "
 import sys, json
@@ -438,7 +423,8 @@ print(json.dumps(params, indent=2))
     CUDA_VERSION=$(nvcc --version 2>/dev/null | grep "release" | awk '{print $6}' | tr -d ',' || echo "N/A")
     NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo "0")
 
-    # 生成完整记录文件
+    # Skip generating record in records directory
+    log_info "跳过在records目录生成记录文件"
     cat > "$TEMP_RECORD_FILE" <<EOF
 {
   "experiment": {
@@ -513,13 +499,10 @@ find_hydra_output_dir() {
         HYDRA_OUTPUT_DIR="$hydra_dirs"
         log_success "找到Hydra输出目录: $HYDRA_OUTPUT_DIR"
         
-        # Also update CHECKPOINT_DIR to point to the Hydra output's 'out' directory if we haven't already
-        if [ "$CHECKPOINT_DIR" = "${PROJECT_ROOT}/outputs/checkpoints/${EXP_ID}" ] || [ ! -d "$CHECKPOINT_DIR" ] || [ ! "$(ls -A "$CHECKPOINT_DIR" 2>/dev/null)" ]; then
-            # Only update if we're still using the default location or it's empty
-            if [ -d "$HYDRA_OUTPUT_DIR/out" ]; then
-                CHECKPOINT_DIR="$HYDRA_OUTPUT_DIR/out"
-                log_info "更新CHECKPOINT_DIR到Hydra输出目录: $CHECKPOINT_DIR"
-            fi
+        # Update CHECKPOINT_DIR to point to the Hydra output's 'out' directory
+        if [ -d "$HYDRA_OUTPUT_DIR/out" ]; then
+            CHECKPOINT_DIR="$HYDRA_OUTPUT_DIR/out"
+            log_info "更新CHECKPOINT_DIR到Hydra输出目录: $CHECKPOINT_DIR"
         fi
         
         # Copy the record file to Hydra output directory
