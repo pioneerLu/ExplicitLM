@@ -1,0 +1,18 @@
+{
+  "experiment": {
+    "id": "exp_001 cluster",
+    "description": "基线实验 Hydra-Zen配置版 knowledge_num=1M epochs=10",
+    "timestamp": "2025-10-29T12:22:39Z"
+  },
+  "versions": {
+    "code_commit": "e0152b92a77d29d1b8df73101443651c268d7021",
+    "data": {
+      "dataset_commit": "28065662dcc2fbccfb47ada4147452adeb00d905",
+      "val_dataset_commit": "cd7f9bb784c5dbfabf8193cbca40d66d99e3ba09",
+      "embedding_commit": "N/A",
+      "database_init_commit": "N/A",
+      "cache_commit": "N/A"
+    }
+  },
+  "command": "accelerate launch 1_pretrain.py --out_dir /home/pci/ExplicitLM/checkpoints/exp_001 cluster training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4"
+}

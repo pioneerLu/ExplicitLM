@@ -4,7 +4,7 @@
 ################################################################################
 
 # 实验ID
-EXP_ID="exp_001_hydra_zen"
+EXP_ID="exp_001_hydra_zen_test"
 
 # 实验描述
 EXP_DESC="基线实验 Hydra-Zen配置版 knowledge_num=1M epochs=10"

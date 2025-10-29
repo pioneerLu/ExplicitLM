@@ -114,6 +114,13 @@ smart_sync_dataset() {
     local target_version=$2
     local dvc_file="data/${dataset_name}.dvc"
 
+    # 检查DVC文件是否存在
+    if [ ! -f "$dvc_file" ]; then
+        log_warning "  - ${dataset_name}: DVC文件不存在 ($dvc_file)，跳过同步"
+        eval "${dataset_name^^}_COMMIT=\"N/A\""
+        return 0
+    fi
+
     # 如果目标版本为空，使用当前版本
     if [ -z "$target_version" ]; then
         target_version=$(git log -1 --format="%H" -- "$dvc_file" 2>/dev/null || echo "$CODE_COMMIT")
@@ -132,8 +139,20 @@ smart_sync_dataset() {
     # 版本不同，需要同步
     log_warning "  - ${dataset_name}: 版本变更 ${current_version:0:8} → ${target_version:0:8}，开始同步..."
 
+    # 首先暂存当前更改，防止冲突
+    local stash_output=$(git stash push -m "Stash by _run_experiment_cluster_pre.sh for $dvc_file" -- "$dvc_file" 2>&1 || true)
+    local stash_needed=$?
+    
     # 切换到目标版本
-    git checkout "$target_version" --quiet
+    if ! git checkout "$target_version" --quiet; then
+        log_error "    无法切换到版本 $target_version"
+        # 恢复之前的更改
+        if [ "$stash_needed" -eq 0 ] && [ -n "$stash_output" ] && echo "$stash_output" | grep -q "Saved"; then
+            git stash pop --quiet 2>/dev/null || true
+        fi
+        eval "${dataset_name^^}_COMMIT=\"FAILED\""
+        return 1
+    fi
 
     # DVC checkout该数据集
     if dvc checkout "$dvc_file"; then
@@ -141,19 +160,44 @@ smart_sync_dataset() {
     else
         log_error "    同步失败，可能需要dvc pull"
         log_info "    尝试执行: dvc pull $dvc_file"
-        dvc pull "$dvc_file" || log_error "    DVC pull失败，请检查网络和远程存储"
+        if dvc pull "$dvc_file"; then
+            log_success "    DVC pull完成"
+        else
+            log_error "    DVC pull失败，请检查网络和远程存储"
+        fi
     fi
 
     # 记录版本
     eval "${dataset_name^^}_COMMIT=\"$target_version\""
 
     # 切回当前分支
-    git checkout "$CURRENT_BRANCH" --quiet
+    if ! git checkout "$CURRENT_BRANCH" --quiet; then
+        log_error "    无法切回当前分支 $CURRENT_BRANCH"
+        # 恢复之前的更改
+        if [ "$stash_needed" -eq 0 ] && [ -n "$stash_output" ] && echo "$stash_output" | grep -q "Saved"; then
+            git stash pop --quiet 2>/dev/null || true
+        fi
+        return 1
+    fi
+
+    # 恢复之前暂存的更改（如果有的话）
+    if [ "$stash_needed" -eq 0 ] && [ -n "$stash_output" ] && echo "$stash_output" | grep -q "Saved"; then
+        git stash pop --quiet 2>/dev/null || true
+    fi
+    
+    return 0
 }
 
 # 同步必需数据集
-smart_sync_dataset "database" "$DATASET_VERSION"
-smart_sync_dataset "benchmarks" "$VAL_DATASET_VERSION"
+if ! smart_sync_dataset "database" "$DATASET_VERSION"; then
+    log_error "数据库同步失败，终止实验"
+    exit 1
+fi
+
+if ! smart_sync_dataset "benchmarks" "$VAL_DATASET_VERSION"; then
+    log_error "基准测试数据同步失败，终止实验"
+    exit 1
+fi
 
 # 同步可选数据集
 [ -n "$EMBEDDING_VERSION" ] && smart_sync_dataset "embeddings" "$EMBEDDING_VERSION"
@@ -179,8 +223,8 @@ cat > "$META_FILE" <<EOF
   "versions": {
     "code_commit": "$CODE_COMMIT",
     "data": {
-      "dataset_commit": "$DATABASE_COMMIT",
-      "val_dataset_commit": "$BENCHMARKS_COMMIT",
+      "dataset_commit": "${DATABASE_COMMIT:-N/A}",
+      "val_dataset_commit": "${BENCHMARKS_COMMIT:-N/A}",
       "embedding_commit": "${EMBEDDINGS_COMMIT:-N/A}",
       "database_init_commit": "${DATABASE_INIT_COMMIT:-N/A}",
       "cache_commit": "${CACHE_COMMIT:-N/A}"
@@ -208,8 +252,8 @@ export TRAIN_ARGS="$TRAIN_ARGS"
 
 # 版本信息
 export CODE_COMMIT="$CODE_COMMIT"
-export DATABASE_COMMIT="$DATABASE_COMMIT"
-export BENCHMARKS_COMMIT="$BENCHMARKS_COMMIT"
+export DATABASE_COMMIT="${DATABASE_COMMIT:-N/A}"
+export BENCHMARKS_COMMIT="${BENCHMARKS_COMMIT:-N/A}"
 export EMBEDDINGS_COMMIT="${EMBEDDINGS_COMMIT:-N/A}"
 export DATABASE_INIT_COMMIT="${DATABASE_INIT_COMMIT:-N/A}"
 export CACHE_COMMIT="${CACHE_COMMIT:-N/A}"

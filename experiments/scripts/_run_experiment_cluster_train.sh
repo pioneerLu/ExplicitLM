@@ -46,7 +46,13 @@ log_info "实验ID: $EXP_ID"
 log_info "========================================="
 
 # 路径定义
-PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+# In cluster environment, git might not be available, so we use a fallback
+if git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+    PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+else
+    PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    log_info "Git not available, using PROJECT_ROOT: $PROJECT_ROOT"
+fi
 STATE_FILE="${PROJECT_ROOT}/.cluster_state_${EXP_ID}"
 SWANLAB_URL_FILE="${PROJECT_ROOT}/.swanlab_url_${EXP_ID}"
 
@@ -65,14 +71,14 @@ else
     log_warning "未找到状态文件: $STATE_FILE"
     log_info "使用当前环境变量（确保已正确设置）"
 
-    # 设置默认路径
-    CHECKPOINT_DIR="${PROJECT_ROOT}/checkpoints/${EXP_ID}"
-
     if [ -z "$TRAIN_ARGS" ]; then
         log_error "缺少训练参数 TRAIN_ARGS"
         exit 1
     fi
 fi
+
+# 设置checkpoint目录路径 (确保无论是否加载状态文件都有此变量)
+CHECKPOINT_DIR="${PROJECT_ROOT}/checkpoints/${EXP_ID}"
 
 ################################################################################
 # 运行训练
@@ -83,16 +89,22 @@ log_info "开始训练..."
 rm -f "$SWANLAB_URL_FILE"
 rm -f "${PROJECT_ROOT}/.swanlab_url"
 
-# 构建训练命令
-TRAIN_CMD="accelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR --use_swanlab $TRAIN_ARGS"
+# 构建训练命令 - check if swanlab is requested in TRAIN_ARGS
+if [[ "$TRAIN_ARGS" == *"--use_swanlab"* ]] || [[ "$TRAIN_ARGS" == *"use_swanlab=True"* ]]; then
+    TRAIN_CMD="accelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS"
+    log_info "SwanLab已启用，训练命令: accelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS"
+else
+    TRAIN_CMD="accelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS"
+    log_info "SwanLab未启用，训练命令: $TRAIN_CMD"
+fi
 
 log_info "执行命令: $TRAIN_CMD"
 echo ""
 
-# 运行训练
-eval $TRAIN_CMD
-
-if [ $? -ne 0 ]; then
+# 运行训练 with better error handling
+if eval $TRAIN_CMD; then
+    log_success "训练完成"
+else
     log_error "训练失败！"
     exit 1
 fi
@@ -104,19 +116,27 @@ log_success "训练完成"
 ################################################################################
 log_info "处理SwanLab URL..."
 
-# 检查两个可能的URL文件位置
-if [ -f "${PROJECT_ROOT}/.swanlab_url" ]; then
-    SWANLAB_URL=$(cat "${PROJECT_ROOT}/.swanlab_url")
-    # 复制到实验专用文件
-    echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
-    log_success "SwanLab URL已保存: $SWANLAB_URL"
-elif [ -f "$SWANLAB_URL_FILE" ]; then
-    SWANLAB_URL=$(cat "$SWANLAB_URL_FILE")
-    log_success "SwanLab URL: $SWANLAB_URL"
+# Check if swanlab was requested based on TRAIN_ARGS
+if [[ "$TRAIN_ARGS" == *"--use_swanlab"* ]] || [[ "$TRAIN_ARGS" == *"use_swanlab=True"* ]]; then
+    # 检查两个可能的URL文件位置
+    if [ -f "${PROJECT_ROOT}/.swanlab_url" ]; then
+        SWANLAB_URL=$(cat "${PROJECT_ROOT}/.swanlab_url")
+        # 复制到实验专用文件
+        echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
+        log_success "SwanLab URL已保存: $SWANLAB_URL"
+    elif [ -f "$SWANLAB_URL_FILE" ]; then
+        SWANLAB_URL=$(cat "$SWANLAB_URL_FILE")
+        log_success "SwanLab URL: $SWANLAB_URL"
+    else
+        SWANLAB_URL="N/A"
+        echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
+        log_warning "未找到SwanLab URL文件，可能SwanLab未成功启动"
+    fi
 else
+    # SwanLab was not requested, set URL to N/A
     SWANLAB_URL="N/A"
     echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
-    log_warning "未找到SwanLab URL"
+    log_info "SwanLab未启用，跳过URL处理"
 fi
 
 ################################################################################

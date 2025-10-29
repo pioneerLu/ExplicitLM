@@ -46,7 +46,13 @@ log_info "实验ID: $EXP_ID"
 log_info "========================================="
 
 # 路径定义
-PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+# In cluster environment, git might not be available, so we use a fallback
+if git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+    PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+else
+    PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    log_info "Git not available, using PROJECT_ROOT: $PROJECT_ROOT"
+fi
 STATE_FILE="${PROJECT_ROOT}/.cluster_state_${EXP_ID}"
 SWANLAB_URL_FILE="${PROJECT_ROOT}/.swanlab_url_${EXP_ID}"
 CHECKPOINT_DIR="${PROJECT_ROOT}/checkpoints/${EXP_ID}"
@@ -115,38 +121,69 @@ fi
 ################################################################################
 log_info "步骤4/5: 生成实验记录文件..."
 
-# 提取训练参数为JSON
-PARAMS_JSON=$(python3 -c "
-import sys, json
-args = '$TRAIN_ARGS'.split()
-params = {}
-i = 0
-while i < len(args):
-    if args[i].startswith('--'):
-        key = args[i][2:]
-        if i + 1 < len(args) and not args[i+1].startswith('--'):
-            value = args[i+1]
-            try:
-                value = int(value)
-            except ValueError:
+# 提取训练参数为JSON with better error handling
+if command -v python3 >/dev/null 2>&1; then
+    PARAMS_JSON=$(python3 -c "
+import sys, json, shlex
+try:
+    args = shlex.split('$TRAIN_ARGS')
+    params = {}
+    i = 0
+    while i < len(args):
+        if args[i].startswith('--'):
+            key = args[i][2:]
+            if i + 1 < len(args) and not args[i+1].startswith('--') and not args[i+1].startswith('-'):
+                value = args[i+1]
+                # Try to convert to appropriate type
                 try:
-                    value = float(value)
+                    if '.' in value:
+                        value = float(value)
+                    else:
+                        value = int(value)
                 except ValueError:
-                    pass
-            params[key] = value
-            i += 2
+                    # Check for boolean values
+                    if value.lower() in ('true', 'yes', 'on'):
+                        value = True
+                    elif value.lower() in ('false', 'no', 'off'):
+                        value = False
+                    # Keep as string otherwise
+                params[key] = value
+                i += 2
+            else:
+                params[key] = True
+                i += 1
         else:
-            params[key] = True
             i += 1
-    else:
-        i += 1
-print(json.dumps(params, indent=2))
+    print(json.dumps(params, indent=2))
+except Exception:
+    print('{}')
 " 2>/dev/null || echo "{}")
+else
+    PARAMS_JSON="{}"
+    log_warning "Python3 not available, hyperparameters will be empty"
+fi
 
-# 获取环境信息
-PYTHON_VERSION=$(python3 --version | awk '{print $2}')
-CUDA_VERSION=$(nvcc --version 2>/dev/null | grep "release" | awk '{print $6}' | tr -d ',' || echo "N/A")
-NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo "0")
+# 获取环境信息 with better error handling
+if command -v python3 >/dev/null 2>&1; then
+    PYTHON_VERSION=$(python3 --version 2>/dev/null | awk '{print $2}' || echo "unknown")
+else
+    PYTHON_VERSION="N/A"
+    log_warning "Python3 not available"
+fi
+
+if command -v nvcc >/dev/null 2>&1; then
+    CUDA_VERSION=$(nvcc --version 2>/dev/null | grep "release" | awk '{print $6}' | tr -d ',' || echo "unknown")
+else
+    CUDA_VERSION="N/A"
+    log_info "nvcc not available"
+fi
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo "0")
+else
+    NUM_GPUS=0
+    log_info "nvidia-smi not available"
+fi
 
 # 生成记录文件
 cat > "$RECORD_FILE" <<EOF
@@ -163,9 +200,9 @@ cat > "$RECORD_FILE" <<EOF
     "code_commit": "$CODE_COMMIT",
     "code_commit_short": "${CODE_COMMIT:0:8}",
     "data": {
-      "dataset_commit": "$DATABASE_COMMIT",
+      "dataset_commit": "${DATABASE_COMMIT:-N/A}",
       "dataset_commit_short": "${DATABASE_COMMIT:0:8}",
-      "val_dataset_commit": "$BENCHMARKS_COMMIT",
+      "val_dataset_commit": "${BENCHMARKS_COMMIT:-N/A}",
       "val_dataset_commit_short": "${BENCHMARKS_COMMIT:0:8}",
       "embedding_commit": "${EMBEDDINGS_COMMIT:-N/A}",
       "embedding_commit_short": "${EMBEDDINGS_COMMIT:0:8}",
@@ -204,7 +241,12 @@ log_success "实验记录已生成: $RECORD_FILE"
 
 echo ""
 log_info "========== 实验记录内容 =========="
-cat "$RECORD_FILE" | python3 -m json.tool 2>/dev/null || cat "$RECORD_FILE"
+if command -v python3 >/dev/null 2>&1; then
+    cat "$RECORD_FILE" | python3 -m json.tool 2>/dev/null || cat "$RECORD_FILE"
+else
+    cat "$RECORD_FILE"
+    log_warning "Python3 not available for JSON formatting"
+fi
 log_info "=================================="
 echo ""
 
@@ -215,11 +257,24 @@ log_info "步骤5/5: 提交到Git..."
 
 echo ""
 log_info "将要提交的变更："
-git status --short
-echo ""
+if git status --short 2>/dev/null; then
+    echo ""
+else
+    log_warning "Git not available or not in repository for status check"
+    echo ""
+fi
 
-git add -A
-git commit -m "exp: ${EXP_ID} - ${EXP_DESC}"
+if git add -A 2>/dev/null; then
+    if git commit -m "exp: ${EXP_ID} - ${EXP_DESC}" 2>/dev/null; then
+        log_success "所有变更已提交到Git"
+    else
+        log_error "Git提交失败"
+        exit 1
+    fi
+else
+    log_error "Git add失败"
+    exit 1
+fi
 
 log_success "所有变更已提交到Git"
 

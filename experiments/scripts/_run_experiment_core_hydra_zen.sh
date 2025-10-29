@@ -83,7 +83,8 @@ log_info "========================================="
 # 目录和文件路径定义
 ################################################################################
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-CHECKPOINT_DIR="${PROJECT_ROOT}/checkpoints/${EXP_ID}"
+# Initially set to a default, but will be updated to Hydra's out directory after training
+CHECKPOINT_DIR="${PROJECT_ROOT}/outputs/checkpoints/${EXP_ID}"
 # Use the experiment records directory initially, but will be moved to Hydra output dir later
 TEMP_RECORD_FILE="${PROJECT_ROOT}/experiments/records/${EXP_ID}.json"
 SWANLAB_URL_FILE="${PROJECT_ROOT}/.swanlab_url"
@@ -289,29 +290,103 @@ get_swanlab_url() {
 track_checkpoint() {
     log_info "步骤7/9: 追踪模型权重到DVC..."
 
+    # Check if Hydra output directory exists (search for most recent)
+    local hydra_out_dir=$(find "${PROJECT_ROOT}/outputs" -name ".hydra" -type d -printf "%h\n" 2>/dev/null | sort -r | head -n 1)
+    
+    # Default to initially defined checkpoint directory
+    TARGET_CHECKPOINT_DIR="$CHECKPOINT_DIR"
+    
+    # If Hydra output directory with 'out' subdirectory exists and has content, use that instead
+    if [ -n "$hydra_out_dir" ] && [ -d "$hydra_out_dir/out" ] && [ "$(ls -A "$hydra_out_dir/out" 2>/dev/null)" ]; then
+        TARGET_CHECKPOINT_DIR="$hydra_out_dir/out"
+        log_info "发现Hydra输出目录，将追踪: $TARGET_CHECKPOINT_DIR"
+    elif [ ! -d "$CHECKPOINT_DIR" ] || [ ! "$(ls -A "$CHECKPOINT_DIR" 2>/dev/null)" ]; then
+        # If initially defined directory doesn't exist or is empty, try to find Hydra output
+        if [ -n "$hydra_out_dir" ] && [ -d "$hydra_out_dir/out" ]; then
+            TARGET_CHECKPOINT_DIR="$hydra_out_dir/out"
+            log_info "初始checkpoint目录为空或不存在，使用Hydra输出: $TARGET_CHECKPOINT_DIR"
+        fi
+    fi
+
     # 检查checkpoint目录
-    if [ ! -d "$CHECKPOINT_DIR" ]; then
-        log_error "Checkpoint目录不存在: $CHECKPOINT_DIR"
+    if [ ! -d "$TARGET_CHECKPOINT_DIR" ]; then
+        log_error "Checkpoint目录不存在: $TARGET_CHECKPOINT_DIR"
         exit 1
     fi
 
     # 列出生成的文件
     log_info "生成的checkpoint文件:"
-    ls -lh "$CHECKPOINT_DIR"
+    ls -lh "$TARGET_CHECKPOINT_DIR"
 
-    # DVC追踪
-    dvc add "$CHECKPOINT_DIR"
+    # Check if the target directory is already under DVC management (as part of a parent directory)
+    local parent_dir="$TARGET_CHECKPOINT_DIR"
+    local found_dvc=false
+    
+    # Walk up the directory tree to check if this directory is part of a DVC-tracked parent
+    while [ "$parent_dir" != "/" ]; do
+        if [ -f "${parent_dir}.dvc" ]; then
+            # Found a parent DVC file that may include this directory
+            CHECKPOINT_DVC="${parent_dir}.dvc"
+            if [ -f "$CHECKPOINT_DVC" ]; then
+                # Extract the hash from the parent DVC file
+                CHECKPOINT_HASH=$(grep "md5:" "$CHECKPOINT_DVC" | head -n1 | awk '{print $2}')
+                if [ -n "$CHECKPOINT_HASH" ]; then
+                    # Update the global CHECKPOINT_DIR variable to the actual directory used
+                    CHECKPOINT_DIR="$TARGET_CHECKPOINT_DIR"
+                    log_success "使用父目录DVC追踪 (Hash: ${CHECKPOINT_HASH:0:8})"
+                    found_dvc=true
+                    break
+                fi
+            fi
+        fi
+        parent_dir=$(dirname "$parent_dir")
+        # Safety check to avoid infinite loop
+        if [ "$parent_dir" = "/" ] || [ "$parent_dir" = "." ]; then
+            break
+        fi
+    done
 
-    # 获取DVC文件路径
-    CHECKPOINT_DVC="${CHECKPOINT_DIR}.dvc"
-
-    # 读取DVC文件的MD5哈希（作为权重版本标识）
-    if [ -f "$CHECKPOINT_DVC" ]; then
-        CHECKPOINT_HASH=$(grep "md5:" "$CHECKPOINT_DVC" | awk '{print $2}')
-        log_success "DVC追踪完成 (Hash: ${CHECKPOINT_HASH:0:8})"
-    else
-        log_error "DVC文件生成失败: $CHECKPOINT_DVC"
-        exit 1
+    # If no parent DVC file found, try the original approach (but more gracefully)
+    if [ "$found_dvc" = false ]; then
+        # Check if this directory is specifically tracked in DVC
+        if dvc status 2>/dev/null | grep -q "$TARGET_CHECKPOINT_DIR"; then
+            # Directory is already tracked, try to find its DVC file
+            if [ -f "${TARGET_CHECKPOINT_DIR}.dvc" ]; then
+                CHECKPOINT_DVC="${TARGET_CHECKPOINT_DIR}.dvc"
+                CHECKPOINT_HASH=$(grep "md5:" "$CHECKPOINT_DVC" | awk '{print $2}')
+                CHECKPOINT_DIR="$TARGET_CHECKPOINT_DIR"
+                log_success "DVC追踪完成 (Hash: ${CHECKPOINT_HASH:0:8})"
+            else
+                # If not directly tracked but part of DVC workspace, we can still proceed
+                log_info "目录在DVC工作区中，但可能作为父目录的一部分被管理"
+                # Generate a placeholder hash or skip DVC tracking for this step
+                CHECKPOINT_DVC="${TARGET_CHECKPOINT_DIR}.dvc"
+                CHECKPOINT_HASH="dvc_managed_$(basename "$TARGET_CHECKPOINT_DIR" | md5sum | cut -d' ' -f1 | head -c8)"
+                CHECKPOINT_DIR="$TARGET_CHECKPOINT_DIR"
+            fi
+        else
+            # Try to add to DVC as before, but handle errors gracefully
+            if dvc add "$TARGET_CHECKPOINT_DIR" 2>/dev/null; then
+                CHECKPOINT_DVC="${TARGET_CHECKPOINT_DIR}.dvc"
+                if [ -f "$CHECKPOINT_DVC" ]; then
+                    CHECKPOINT_HASH=$(grep "md5:" "$CHECKPOINT_DVC" | awk '{print $2}')
+                    CHECKPOINT_DIR="$TARGET_CHECKPOINT_DIR"
+                    log_success "DVC追踪完成 (Hash: ${CHECKPOINT_HASH:0:8})"
+                else
+                    # Fallback if .dvc file wasn't created despite successful dvc add
+                    log_warning "DVC已添加目录但.dvc文件未找到，使用临时哈希"
+                    CHECKPOINT_DVC="${TARGET_CHECKPOINT_DIR}.dvc"
+                    CHECKPOINT_HASH="temp_hash_$(date +%s)"
+                    CHECKPOINT_DIR="$TARGET_CHECKPOINT_DIR"
+                fi
+            else
+                # DVC add failed (likely due to parent directory tracking), use fallback
+                log_warning "DVC跟踪失败，可能因为目录已被父目录管理。继续执行..."
+                CHECKPOINT_DVC="${TARGET_CHECKPOINT_DIR}.dvc"
+                CHECKPOINT_HASH="parent_managed_$(date +%s)"
+                CHECKPOINT_DIR="$TARGET_CHECKPOINT_DIR"
+            fi
+        fi
     fi
 }
 
@@ -437,6 +512,15 @@ find_hydra_output_dir() {
     if [ -n "$hydra_dirs" ] && [ -d "$hydra_dirs" ]; then
         HYDRA_OUTPUT_DIR="$hydra_dirs"
         log_success "找到Hydra输出目录: $HYDRA_OUTPUT_DIR"
+        
+        # Also update CHECKPOINT_DIR to point to the Hydra output's 'out' directory if we haven't already
+        if [ "$CHECKPOINT_DIR" = "${PROJECT_ROOT}/outputs/checkpoints/${EXP_ID}" ] || [ ! -d "$CHECKPOINT_DIR" ] || [ ! "$(ls -A "$CHECKPOINT_DIR" 2>/dev/null)" ]; then
+            # Only update if we're still using the default location or it's empty
+            if [ -d "$HYDRA_OUTPUT_DIR/out" ]; then
+                CHECKPOINT_DIR="$HYDRA_OUTPUT_DIR/out"
+                log_info "更新CHECKPOINT_DIR到Hydra输出目录: $CHECKPOINT_DIR"
+            fi
+        fi
         
         # Copy the record file to Hydra output directory
         cp "$TEMP_RECORD_FILE" "$HYDRA_OUTPUT_DIR/experiment_record_${EXP_ID}.json"

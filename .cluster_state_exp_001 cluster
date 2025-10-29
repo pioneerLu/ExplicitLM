@@ -1,0 +1,22 @@
+# 集群实验状态文件 - exp_001 cluster
+# 生成时间: 2025-10-29T12:22:39Z
+
+# 实验配置
+export EXP_ID="exp_001 cluster"
+export EXP_DESC="基线实验 Hydra-Zen配置版 knowledge_num=1M epochs=10"
+export TRAIN_ARGS="training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4"
+
+# 版本信息
+export CODE_COMMIT="e0152b92a77d29d1b8df73101443651c268d7021"
+export DATABASE_COMMIT="28065662dcc2fbccfb47ada4147452adeb00d905"
+export BENCHMARKS_COMMIT="cd7f9bb784c5dbfabf8193cbca40d66d99e3ba09"
+export EMBEDDINGS_COMMIT="N/A"
+export DATABASE_INIT_COMMIT="N/A"
+export CACHE_COMMIT="N/A"
+
+# 路径信息
+export PROJECT_ROOT="/home/pci/ExplicitLM"
+export CHECKPOINT_DIR="/home/pci/ExplicitLM/checkpoints/exp_001 cluster"
+export RECORD_FILE="/home/pci/ExplicitLM/experiments/records/exp_001 cluster.json"
+export META_FILE="/home/pci/ExplicitLM/.experiment_meta_exp_001 cluster"
+export TIMESTAMP="2025-10-29T12:22:39Z"
