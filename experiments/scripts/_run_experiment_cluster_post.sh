@@ -325,22 +325,31 @@ sync_swanlab_data() {
     if [[ "$TRAIN_ARGS" == *"--use_swanlab"* ]] || [[ "$TRAIN_ARGS" == *"use_swanlab=True"* ]]; then
         # 检查swanlab命令是否可用
         if command -v swanlab &> /dev/null; then
-            # 查找SwanLab数据目录（通常在输出目录中的swanlog子目录）
+            # 查找SwanLab数据目录（通常在输出目录中的swanlog子目录下的run-*目录）
             if [ -n "$HYDRA_OUTPUT_DIR" ] && [ -d "$HYDRA_OUTPUT_DIR/swanlog" ]; then
                 log_info "找到SwanLab日志目录: $HYDRA_OUTPUT_DIR/swanlog"
 
-                # 尝试同步SwanLab数据
-                log_info "执行SwanLab同步命令..."
-                if swanlab sync "$HYDRA_OUTPUT_DIR/swanlog"; then
-                    log_success "SwanLab数据同步成功"
+                # 查找具体的run-*目录（SwanLab创建的子目录）
+                local run_dir=$(find "$HYDRA_OUTPUT_DIR/swanlog" -name "run-*" -type d | head -n 1)
 
-                    # 获取同步后的URL
-                    if [ -f "$SWANLAB_URL_FILE" ]; then
-                        SWANLAB_URL=$(cat "$SWANLAB_URL_FILE")
-                        log_info "SwanLab URL: $SWANLAB_URL"
+                if [ -n "$run_dir" ] && [ -d "$run_dir" ]; then
+                    log_info "找到SwanLab运行目录: $run_dir"
+
+                    # 尝试同步SwanLab数据
+                    log_info "执行SwanLab同步命令..."
+                    if swanlab sync "$run_dir"; then
+                        log_success "SwanLab数据同步成功"
+
+                        # 获取同步后的URL
+                        if [ -f "$SWANLAB_URL_FILE" ]; then
+                            SWANLAB_URL=$(cat "$SWANLAB_URL_FILE")
+                            log_info "SwanLab URL: $SWANLAB_URL"
+                        fi
+                    else
+                        log_warning "SwanLab同步失败，可能没有网络连接或数据为空"
                     fi
                 else
-                    log_warning "SwanLab同步失败，可能没有网络连接或数据为空"
+                    log_warning "未找到SwanLab运行目录 (run-*)，跳过同步"
                 fi
             else
                 log_info "未找到SwanLab日志目录，跳过同步"
