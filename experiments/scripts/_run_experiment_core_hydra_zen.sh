@@ -87,8 +87,10 @@ PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 CHECKPOINT_DIR=""
 # Use the Hydra output directory for the temporary record file
 TEMP_RECORD_FILE=""
-# Permanent record file in experiments/records directory
-RECORD_FILE="${PROJECT_ROOT}/experiments/records/${EXP_ID}.json"
+# Generate timestamp for unique record filename
+TIMESTAMP_FILENAME=$(date +"%Y%m%d_%H%M%S")
+# Permanent record file in experiments/records directory with timestamp
+RECORD_FILE="${PROJECT_ROOT}/experiments/records/${EXP_ID}_${TIMESTAMP_FILENAME}.json"
 # SWANLAB_URL_FILE will be set after finding Hydra output directory
 SWANLAB_URL_FILE=""
 META_FILE="${PROJECT_ROOT}/.experiment_meta"
@@ -117,15 +119,14 @@ check_prerequisites() {
     # 创建records目录
     mkdir -p "${PROJECT_ROOT}/experiments/records"
 
-    # 检查实验ID是否已存在
-    if [ -f "$RECORD_FILE" ]; then
-        log_error "实验ID ${EXP_ID} 已存在！"
-        log_info "现有记录文件: $RECORD_FILE"
-        read -p "是否覆盖？(y/N): " confirm
-        if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
-            log_info "取消实验"
-            exit 0
-        fi
+    # 检查实验ID是否已存在（检查相同EXP_ID前缀的记录）
+    existing_records=$(find "${PROJECT_ROOT}/experiments/records" -name "${EXP_ID}_*.json" 2>/dev/null)
+    if [ -n "$existing_records" ]; then
+        log_warning "实验ID ${EXP_ID} 已有历史记录："
+        echo "$existing_records" | while read -r record; do
+            log_info "  - $record"
+        done
+        log_info "将创建新的带时间戳的记录文件: $RECORD_FILE"
     fi
 
     log_success "前置检查通过"
@@ -358,12 +359,16 @@ print(json.dumps(params, indent=2))
 
     # Generate record file
     log_info "生成实验记录文件..."
+    # 记录文件名（用于reproduction）
+    RECORD_FILENAME=$(basename "$RECORD_FILE")
+
     cat > "$TEMP_RECORD_FILE" <<EOF
 {
   "experiment": {
     "id": "$EXP_ID",
     "description": "$EXP_DESC",
     "timestamp": "$(date -u +\"%Y-%m-%dT%H:%M:%SZ\")",
+    "record_filename": "$RECORD_FILENAME",
     "script": "run_experiment_hydra_zen.sh",
     "command": "python 1_pretrain.py $TRAIN_ARGS"
   },
