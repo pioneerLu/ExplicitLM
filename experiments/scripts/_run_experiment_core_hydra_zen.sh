@@ -258,7 +258,7 @@ run_training() {
     log_info "步骤5/11: 开始训练..."
 
     # 构建训练命令 - 使用hydra_zen格式的参数
-    TRAIN_CMD="python 1_pretrain.py $TRAIN_ARGS"
+    TRAIN_CMD="accelerate launch 1_pretrain.py $TRAIN_ARGS"
 
     log_info "执行命令: $TRAIN_CMD"
     echo ""
