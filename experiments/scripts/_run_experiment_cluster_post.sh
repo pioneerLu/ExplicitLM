@@ -73,20 +73,14 @@ else
 fi
 
 ################################################################################
-# 步骤2: 读取SwanLab URL
+# 步骤2: 初始化SwanLab URL（将在sync步骤中更新）
 ################################################################################
-log_info "步骤2/5: 读取SwanLab URL..."
+log_info "步骤2/5: 初始化SwanLab URL..."
 
-if [ -f "$SWANLAB_URL_FILE" ]; then
-    SWANLAB_URL=$(cat "$SWANLAB_URL_FILE")
-    log_success "SwanLab URL: $SWANLAB_URL"
-elif [ -f "${PROJECT_ROOT}/.swanlab_url" ]; then
-    SWANLAB_URL=$(cat "${PROJECT_ROOT}/.swanlab_url")
-    log_success "SwanLab URL: $SWANLAB_URL"
-else
-    SWANLAB_URL="N/A"
-    log_warning "未找到SwanLab URL"
-fi
+# SwanLab URL将在sync_swanlab_data函数中生成和更新
+# 这里先设置为N/A，避免在sync之前就读取
+SWANLAB_URL="N/A"
+log_info "SwanLab URL将在同步步骤中获取"
 
 ################################################################################
 # 步骤3: 验证checkpoint目录
@@ -335,30 +329,56 @@ sync_swanlab_data() {
                 if [ -n "$run_dir" ] && [ -d "$run_dir" ]; then
                     log_info "找到SwanLab运行目录: $run_dir"
 
-                    # 尝试同步SwanLab数据
+                    # 尝试同步SwanLab数据并捕获输出
                     log_info "执行SwanLab同步命令..."
-                    if swanlab sync "$run_dir"; then
+                    local sync_output
+                    if sync_output=$(swanlab sync "$run_dir" 2>&1); then
                         log_success "SwanLab数据同步成功"
 
-                        # 获取同步后的URL
-                        if [ -f "$SWANLAB_URL_FILE" ]; then
-                            SWANLAB_URL=$(cat "$SWANLAB_URL_FILE")
-                            log_info "SwanLab URL: $SWANLAB_URL"
+                        # 从sync输出中提取URL
+                        local extracted_url
+                        extracted_url=$(echo "$sync_output" | grep -oE 'https?://[^[:space:]]+' | head -n 1 || echo "")
+
+                        if [ -n "$extracted_url" ]; then
+                            SWANLAB_URL="$extracted_url"
+                            # 保存到两个URL文件
+                            echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
+                            echo "$SWANLAB_URL" > "${PROJECT_ROOT}/.swanlab_url"
+                            log_success "SwanLab URL已保存: $SWANLAB_URL"
+                        else
+                            log_warning "未能从同步输出中提取URL"
+                            SWANLAB_URL="N/A"
+                            echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
                         fi
+
+                        log_info "同步输出详情:"
+                        echo "$sync_output" | head -5  # 显示前5行输出
                     else
                         log_warning "SwanLab同步失败，可能没有网络连接或数据为空"
+                        SWANLAB_URL="N/A"
+                        echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
+                        log_info "错误输出:"
+                        echo "$sync_output" | head -3  # 显示前3行错误信息
                     fi
                 else
                     log_warning "未找到SwanLab运行目录 (run-*)，跳过同步"
+                    SWANLAB_URL="N/A"
+                    echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
                 fi
             else
                 log_info "未找到SwanLab日志目录，跳过同步"
+                SWANLAB_URL="N/A"
+                echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
             fi
         else
             log_info "SwanLab命令不可用，跳过同步"
+            SWANLAB_URL="N/A"
+            echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
         fi
     else
         log_info "SwanLab未启用，跳过同步"
+        SWANLAB_URL="N/A"
+        echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
     fi
 }
 
@@ -403,10 +423,9 @@ log_success "所有变更已提交到Git"
 # 清理临时文件
 ################################################################################
 log_info "清理临时文件..."
-rm -f "$SWANLAB_URL_FILE"
-rm -f "${PROJECT_ROOT}/.swanlab_url"
 rm -f "$META_FILE"
 rm -f "$STATE_FILE"
+# 保留SwanLab URL文件供参考，不删除
 log_success "清理完成"
 
 echo ""

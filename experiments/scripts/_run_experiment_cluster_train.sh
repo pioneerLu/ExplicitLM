@@ -85,7 +85,7 @@ fi
 ################################################################################
 log_info "开始训练..."
 
-# 清理旧的SwanLab URL文件
+# 清理旧的SwanLab URL文件（将在post阶段重新生成）
 rm -f "$SWANLAB_URL_FILE"
 rm -f "${PROJECT_ROOT}/.swanlab_url"
 
@@ -112,33 +112,6 @@ fi
 
 log_success "训练完成"
 
-################################################################################
-# 处理SwanLab URL（如果存在）
-################################################################################
-log_info "处理SwanLab URL..."
-
-# Check if swanlab was requested based on TRAIN_ARGS
-if [[ "$TRAIN_ARGS" == *"--use_swanlab"* ]] || [[ "$TRAIN_ARGS" == *"use_swanlab=True"* ]]; then
-    # 检查两个可能的URL文件位置
-    if [ -f "${PROJECT_ROOT}/.swanlab_url" ]; then
-        SWANLAB_URL=$(cat "${PROJECT_ROOT}/.swanlab_url")
-        # 复制到实验专用文件
-        echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
-        log_success "SwanLab URL已保存: $SWANLAB_URL"
-    elif [ -f "$SWANLAB_URL_FILE" ]; then
-        SWANLAB_URL=$(cat "$SWANLAB_URL_FILE")
-        log_success "SwanLab URL: $SWANLAB_URL"
-    else
-        SWANLAB_URL="N/A"
-        echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
-        log_warning "未找到SwanLab URL文件，可能SwanLab未成功启动"
-    fi
-else
-    # SwanLab was not requested, set URL to N/A
-    SWANLAB_URL="N/A"
-    echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
-    log_info "SwanLab未启用，跳过URL处理"
-fi
 
 ################################################################################
 # 检查checkpoint生成
