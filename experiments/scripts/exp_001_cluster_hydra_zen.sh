@@ -23,7 +23,7 @@ CACHE_VERSION=""
 
 # Hydra-Zen 配置覆盖参数（使用 key=value 格式）
 # 格式为 hydra-style overrides, e.g., "training.epochs=10 model.knowledge_num=1048576"
-TRAIN_ARGS="training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4"
+TRAIN_ARGS="training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4 logging.use_swanlab=True"
 
 # ============================================================================
 # 执行阶段选择
