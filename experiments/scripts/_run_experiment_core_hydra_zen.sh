@@ -378,6 +378,12 @@ print(json.dumps(params, indent=2))
     "swanlab_url": "$SWANLAB_URL",
     "checkpoint_dir": "$CHECKPOINT_DIR"
   },
+  "artifacts": {
+    "experiment_output": {
+      "path": "$HYDRA_OUTPUT_DIR",
+      "dvc_file": "${HYDRA_OUTPUT_DIR}.dvc"
+    }
+  },
   "environment": {
     "python_version": "$PYTHON_VERSION",
     "cuda_version": "$CUDA_VERSION",
@@ -389,7 +395,8 @@ print(json.dumps(params, indent=2))
       "git checkout $DATABASE_COMMIT && dvc checkout data/database.dvc && git checkout -",
       "git checkout $BENCHMARKS_COMMIT && dvc checkout data/benchmarks.dvc && git checkout -"
     ],
-    "full_command": "# 1. 恢复代码版本\\\\ngit checkout $CODE_COMMIT\\\\n\\\\n# 2. 恢复数据集版本\\\\ngit checkout $DATABASE_COMMIT && dvc checkout data/database.dvc && git checkout -\\\\n\\\\n# 3. 恢复验证数据集版本\\\\ngit checkout $BENCHMARKS_COMMIT && dvc checkout data/benchmarks.dvc && git checkout -\\\\n\\\\n# 4. 运行训练\\\\npython 1_pretrain.py $TRAIN_ARGS"
+    "experiment_output_pull": "dvc pull ${HYDRA_OUTPUT_DIR}.dvc",
+    "full_command": "# 1. 恢复代码版本\\\\ngit checkout $CODE_COMMIT\\\\n\\\\n# 2. 恢复数据集版本\\\\ngit checkout $DATABASE_COMMIT && dvc checkout data/database.dvc && git checkout -\\\\n\\\\n# 3. 恢复验证数据集版本\\\\ngit checkout $BENCHMARKS_COMMIT && dvc checkout data/benchmarks.dvc && git checkout -\\\\n\\\\n# 4. 拉取实验输出\\\\ndvc pull ${HYDRA_OUTPUT_DIR}.dvc\\\\n\\\\n# 5. 运行训练\\\\npython 1_pretrain.py $TRAIN_ARGS"
   }
 }
 EOF
@@ -440,16 +447,36 @@ find_hydra_output_dir() {
 
 
 ################################################################################
-# 显示Hydra输出目录内容
+# 追踪实验输出目录到DVC
 ################################################################################
-show_hydra_output() {
+track_experiment_output() {
     if [ -n "$HYDRA_OUTPUT_DIR" ] && [ -d "$HYDRA_OUTPUT_DIR" ]; then
-        log_info "步骤8.6/9: 显示Hydra输出目录内容..."
-        log_info "Hydra输出目录内容:"
+        log_info "步骤8.6/9: 追踪实验输出目录到DVC..."
+        log_info "实验输出目录内容:"
         ls -la "$HYDRA_OUTPUT_DIR"
-        log_success "已完成检查Hydra输出目录"
+
+        # 为整个实验目录创建DVC追踪
+        log_info "开始DVC追踪实验目录: $HYDRA_OUTPUT_DIR"
+        if dvc add "$HYDRA_OUTPUT_DIR" 2>/dev/null; then
+            local exp_dvc_file="${HYDRA_OUTPUT_DIR}.dvc"
+            if [ -f "$exp_dvc_file" ]; then
+                local exp_hash=$(grep "md5:" "$exp_dvc_file" | awk '{print $3}')
+                log_success "实验目录DVC追踪完成 (Hash: ${exp_hash:0:8})"
+                log_info "DVC文件: $exp_dvc_file"
+            else
+                log_warning "DVC追踪完成但未找到元文件: $exp_dvc_file"
+            fi
+        else
+            log_warning "DVC追踪失败，可能目录已被管理或无变更: $HYDRA_OUTPUT_DIR"
+            # 检查是否已经有.dvc文件
+            local exp_dvc_file="${HYDRA_OUTPUT_DIR}.dvc"
+            if [ -f "$exp_dvc_file" ]; then
+                local exp_hash=$(grep "md5:" "$exp_dvc_file" | awk '{print $3}')
+                log_info "使用现有DVC追踪 (Hash: ${exp_hash:0:8})"
+            fi
+        fi
     else
-        log_info "Hydra输出目录不存在"
+        log_info "实验输出目录不存在，跳过DVC追踪"
     fi
 }
 
@@ -475,6 +502,9 @@ commit_all_changes() {
     log_info "Commit包含："
     log_info "  - 实验脚本 (如有新增/修改)"
     log_info "  - 记录文件: $TEMP_RECORD_FILE"
+    if [ -n "$HYDRA_OUTPUT_DIR" ]; then
+        log_info "  - 实验输出DVC元文件: ${HYDRA_OUTPUT_DIR}.dvc"
+    fi
     log_info "  - 其他代码变更 (如有)"
 }
 
@@ -509,6 +539,9 @@ print_summary() {
     log_info "复现命令（详见记录文件的reproduction字段）:"
     echo "  1. 恢复代码: git checkout $CODE_COMMIT"
     echo "  2. 恢复数据: 使用记录文件中的data_checkout_steps"
+    if [ -n "$HYDRA_OUTPUT_DIR" ]; then
+        echo "  3. 拉取实验输出: dvc pull ${HYDRA_OUTPUT_DIR}.dvc"
+    fi
     echo ""
     log_success "========================================="
 }
@@ -526,7 +559,7 @@ main() {
     get_swanlab_url
     track_checkpoint
     generate_record
-    show_hydra_output
+    track_experiment_output
     commit_all_changes
     cleanup
     print_summary

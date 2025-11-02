@@ -45,6 +45,9 @@ wandb/
 /outputs/*
 !/outputs/.gitkeep
 !/outputs/*.dvc
+!/outputs/*/
+/outputs/*/*/
+!/outputs/*/*/
 
 # 临时文件
 .swanlab_url
