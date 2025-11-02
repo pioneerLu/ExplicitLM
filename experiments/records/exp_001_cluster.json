@@ -2,14 +2,14 @@
   "experiment": {
     "id": "exp_001_cluster",
     "description": "基线实验 Hydra-Zen配置版 knowledge_num=1M epochs=10",
-    "timestamp": "2025-10-29T13:38:15Z",
+    "timestamp": "2025-11-02T05:33:14Z",
     "mode": "cluster",
     "script": "cluster_experiment.sh",
-    "command": "accelerate launch 1_pretrain.py --out_dir /home/pci/ExplicitLM/outputs/2025-10-29/H-38-15 training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4"
+    "command": "accelerate launch 1_pretrain.py --out_dir /home/pci/ExplicitLM/outputs/2025-11-02/13-33-13_cluster training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4"
   },
   "versions": {
-    "code_commit": "95e9489ebfaa7c32bdf120ae7fc8a7794d903a72",
-    "code_commit_short": "95e9489e",
+    "code_commit": "d51c40362855296a3ea86e71d1d3965392c8f8c9",
+    "code_commit_short": "d51c4036",
     "data": {
       "dataset_commit": "28065662dcc2fbccfb47ada4147452adeb00d905",
       "dataset_commit_short": "28065662",
@@ -23,21 +23,21 @@
       "cache_commit_short": "N/A"
     },
     "checkpoint_info": {
-      "checkpoint_dir": "/home/pci/ExplicitLM/outputs/2025-10-29/H-38-15",
+      "checkpoint_dir": "/home/pci/ExplicitLM/outputs/2025-11-02/13-33-13_cluster",
       "dvc_managed": "true",
       "note": "整个outputs目录已被DVC管理，跳过单独追踪"
     },
     "hydra_output": {
-      "hydra_output_dir": "/home/pci/ExplicitLM/outputs/2025-10-29/21-39-01",
-      "hydra_output_dvc": "/home/pci/ExplicitLM/outputs/2025-10-29/21-39-01.dvc",
-      "hydra_output_hash": "N/A",
-      "hydra_output_hash_short": ""
+      "hydra_output_dir": "/home/pci/ExplicitLM/outputs/2025-11-02/13-33-13_cluster",
+      "hydra_output_dvc": "/home/pci/ExplicitLM/outputs/2025-11-02/13-33-13_cluster.dvc",
+      "hydra_output_hash": "md5:",
+      "hydra_output_hash_short": "md5:"
     }
   },
   "hyperparameters": {},
   "results": {
     "swanlab_url": "N/A",
-    "checkpoint_dir": "/home/pci/ExplicitLM/outputs/2025-10-29/H-38-15"
+    "checkpoint_dir": "/home/pci/ExplicitLM/outputs/2025-11-02/13-33-13_cluster"
   },
   "environment": {
     "python_version": "3.13.5",
@@ -45,13 +45,13 @@
     "num_gpus": 1
   },
   "reproduction": {
-    "code_checkout": "git checkout 95e9489ebfaa7c32bdf120ae7fc8a7794d903a72",
+    "code_checkout": "git checkout d51c40362855296a3ea86e71d1d3965392c8f8c9",
     "data_checkout_steps": [
       "git checkout 28065662dcc2fbccfb47ada4147452adeb00d905 && dvc checkout data/database.dvc && git checkout -",
       "git checkout cd7f9bb784c5dbfabf8193cbca40d66d99e3ba09 && dvc checkout data/benchmarks.dvc && git checkout -"
     ],
     "checkpoint_pull": "dvc pull outputs (整个outputs目录包含checkpoint)",
-    "hydra_output_pull": "dvc pull /home/pci/ExplicitLM/outputs/2025-10-29/21-39-01.dvc",
-    "full_command": "# 1. 恢复代码版本\ngit checkout 95e9489ebfaa7c32bdf120ae7fc8a7794d903a72\n\n# 2. 恢复各数据集版本\ngit checkout 28065662dcc2fbccfb47ada4147452adeb00d905 && dvc checkout data/database.dvc && git checkout -\ngit checkout cd7f9bb784c5dbfabf8193cbca40d66d99e3ba09 && dvc checkout data/benchmarks.dvc && git checkout -\n\n# 3. 拉取输出目录\ndvc pull outputs\n\n# 4. 运行训练\naccelerate launch 1_pretrain.py --out_dir /home/pci/ExplicitLM/outputs/2025-10-29/H-38-15 training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4"
+    "hydra_output_pull": "dvc pull /home/pci/ExplicitLM/outputs/2025-11-02/13-33-13_cluster.dvc",
+    "full_command": "# 1. 恢复代码版本\ngit checkout d51c40362855296a3ea86e71d1d3965392c8f8c9\n\n# 2. 恢复各数据集版本\ngit checkout 28065662dcc2fbccfb47ada4147452adeb00d905 && dvc checkout data/database.dvc && git checkout -\ngit checkout cd7f9bb784c5dbfabf8193cbca40d66d99e3ba09 && dvc checkout data/benchmarks.dvc && git checkout -\n\n# 3. 拉取输出目录\ndvc pull outputs\n\n# 4. 运行训练\naccelerate launch 1_pretrain.py --out_dir /home/pci/ExplicitLM/outputs/2025-11-02/13-33-13_cluster training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4"
   }
 }

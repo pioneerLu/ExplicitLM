@@ -78,7 +78,7 @@ else
 fi
 
 # 设置checkpoint目录路径 (确保无论是否加载状态文件都有此变量)
-CHECKPOINT_DIR="${PROJECT_ROOT}/checkpoints/${EXP_ID}"
+# CHECKPOINT_DIR="${PROJECT_ROOT}/checkpoints/${EXP_ID}"
 
 ################################################################################
 # 运行训练
@@ -89,13 +89,20 @@ log_info "开始训练..."
 rm -f "$SWANLAB_URL_FILE"
 rm -f "${PROJECT_ROOT}/.swanlab_url"
 
-# 构建训练命令 - check if swanlab is requested in TRAIN_ARGS
-if [[ "$TRAIN_ARGS" == *"--use_swanlab"* ]] || [[ "$TRAIN_ARGS" == *"use_swanlab=True"* ]]; then
-    TRAIN_CMD="accelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS"
-    log_info "SwanLab已启用，训练命令: accelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS"
+# 使用pre脚本中生成的FINAL_COMMAND
+if [ -n "$FINAL_COMMAND" ]; then
+    TRAIN_CMD="$FINAL_COMMAND"
+    log_info "使用预构建的训练命令: $TRAIN_CMD"
 else
-    TRAIN_CMD="accelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS"
-    log_info "SwanLab未启用，训练命令: $TRAIN_CMD"
+    # 如果FINAL_COMMAND不存在，则回退到原来的构建方式
+    log_warning "FINAL_COMMAND未定义，使用回退构建方式"
+    if [[ "$TRAIN_ARGS" == *"--use_swanlab"* ]] || [[ "$TRAIN_ARGS" == *"use_swanlab=True"* ]]; then
+        TRAIN_CMD="accelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS"
+        log_info "SwanLab已启用，训练命令: accelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS"
+    else
+        TRAIN_CMD="accelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS"
+        log_info "SwanLab未启用，训练命令: $TRAIN_CMD"
+    fi
 fi
 
 log_info "执行命令: $TRAIN_CMD"

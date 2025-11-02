@@ -1,0 +1,14 @@
+[2025-11-02 13:28:53,487][root][INFO] - cc -pthread -fno-strict-overflow -Wsign-compare -Wunreachable-code -DNDEBUG -g -O3 -Wall -fPIC -fPIC -c /tmp/tmp97cgqsw6/test.c -o /tmp/tmp97cgqsw6/test.o
+[2025-11-02 13:28:53,496][root][INFO] - cc -pthread /tmp/tmp97cgqsw6/test.o -laio -o /tmp/tmp97cgqsw6/a.out
+[2025-11-02 13:28:53,507][root][INFO] - cc -pthread -fno-strict-overflow -Wsign-compare -Wunreachable-code -DNDEBUG -g -O3 -Wall -fPIC -fPIC -c /tmp/tmpla3vd69f/test.c -o /tmp/tmpla3vd69f/test.o
+[2025-11-02 13:28:53,529][root][INFO] - cc -pthread /tmp/tmpla3vd69f/test.o -L/usr/local/cuda-12.6 -L/usr/local/cuda-12.6/lib64 -lcufile -o /tmp/tmpla3vd69f/a.out
+[2025-11-02 13:28:53,562][root][INFO] - cc -pthread -fno-strict-overflow -Wsign-compare -Wunreachable-code -DNDEBUG -g -O3 -Wall -fPIC -fPIC -c /tmp/tmpjm14a19y/test.c -o /tmp/tmpjm14a19y/test.o
+[2025-11-02 13:28:53,573][root][INFO] - cc -pthread /tmp/tmpjm14a19y/test.o -laio -o /tmp/tmpjm14a19y/a.out
+[2025-11-02 13:28:53,783][accelerate.accelerator][INFO] - Since you passed both train and evaluation dataloader, `is_train_batch_min` (here True will decide the `train_batch_size` (1).
+[2025-11-02 13:31:13,425][root][INFO] - cc -pthread -fno-strict-overflow -Wsign-compare -Wunreachable-code -DNDEBUG -g -O3 -Wall -fPIC -fPIC -c /tmp/tmp7l1e3qpk/test.c -o /tmp/tmp7l1e3qpk/test.o
+[2025-11-02 13:31:13,442][root][INFO] - cc -pthread /tmp/tmp7l1e3qpk/test.o -laio -o /tmp/tmp7l1e3qpk/a.out
+[2025-11-02 13:31:13,457][root][INFO] - cc -pthread -fno-strict-overflow -Wsign-compare -Wunreachable-code -DNDEBUG -g -O3 -Wall -fPIC -fPIC -c /tmp/tmp5fukgxnu/test.c -o /tmp/tmp5fukgxnu/test.o
+[2025-11-02 13:31:13,471][root][INFO] - cc -pthread /tmp/tmp5fukgxnu/test.o -L/usr/local/cuda-12.6 -L/usr/local/cuda-12.6/lib64 -lcufile -o /tmp/tmp5fukgxnu/a.out
+[2025-11-02 13:31:13,511][root][INFO] - cc -pthread -fno-strict-overflow -Wsign-compare -Wunreachable-code -DNDEBUG -g -O3 -Wall -fPIC -fPIC -c /tmp/tmps8ss60ls/test.c -o /tmp/tmps8ss60ls/test.o
+[2025-11-02 13:31:13,522][root][INFO] - cc -pthread /tmp/tmps8ss60ls/test.o -laio -o /tmp/tmps8ss60ls/a.out
+[2025-11-02 13:31:13,731][accelerate.accelerator][INFO] - Since you passed both train and evaluation dataloader, `is_train_batch_min` (here True will decide the `train_batch_size` (1).

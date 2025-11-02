@@ -1,0 +1,7 @@
+[2025-11-02 12:36:49,424][root][INFO] - cc -pthread -fno-strict-overflow -Wsign-compare -Wunreachable-code -DNDEBUG -g -O3 -Wall -fPIC -fPIC -c /tmp/tmptie6zo3i/test.c -o /tmp/tmptie6zo3i/test.o
+[2025-11-02 12:36:49,437][root][INFO] - cc -pthread /tmp/tmptie6zo3i/test.o -laio -o /tmp/tmptie6zo3i/a.out
+[2025-11-02 12:36:49,450][root][INFO] - cc -pthread -fno-strict-overflow -Wsign-compare -Wunreachable-code -DNDEBUG -g -O3 -Wall -fPIC -fPIC -c /tmp/tmppv1s7tsd/test.c -o /tmp/tmppv1s7tsd/test.o
+[2025-11-02 12:36:49,472][root][INFO] - cc -pthread /tmp/tmppv1s7tsd/test.o -L/usr/local/cuda-12.6 -L/usr/local/cuda-12.6/lib64 -lcufile -o /tmp/tmppv1s7tsd/a.out
+[2025-11-02 12:36:49,509][root][INFO] - cc -pthread -fno-strict-overflow -Wsign-compare -Wunreachable-code -DNDEBUG -g -O3 -Wall -fPIC -fPIC -c /tmp/tmphg3f2y0o/test.c -o /tmp/tmphg3f2y0o/test.o
+[2025-11-02 12:36:49,520][root][INFO] - cc -pthread /tmp/tmphg3f2y0o/test.o -laio -o /tmp/tmphg3f2y0o/a.out
+[2025-11-02 12:36:49,723][accelerate.accelerator][INFO] - Since you passed both train and evaluation dataloader, `is_train_batch_min` (here True will decide the `train_batch_size` (1).

@@ -228,12 +228,12 @@ process_hydra_output_args() {
         has_output_dir=true
         log_info "  检测到现有输出参数，将保留原有配置"
     fi
-
-    # 检查是否包含hydra相关参数
-    if echo "$TRAIN_ARGS" | grep -q -E "(hydra\.|hydra_)"; then
-        has_hydra=true
-        log_info "  检测到Hydra配置参数"
-    fi
+    has_hydra=true
+    # # 检查是否包含hydra相关参数
+    # if echo "$TRAIN_ARGS" | grep -q -E "(hydra\.|hydra_)"; then
+    #     has_hydra=true
+    #     log_info "  检测到Hydra配置参数"
+    # fi
 
     # 构建最终的训练参数
     FINAL_TRAIN_ARGS="$TRAIN_ARGS"
@@ -242,7 +242,7 @@ process_hydra_output_args() {
     if [ "$has_output_dir" = false ]; then
         if [ "$has_hydra" = true ]; then
             # 为Hydra配置添加输出目录重载
-            FINAL_TRAIN_ARGS="$FINAL_TRAIN_ARGS hydra.job.chdir=False hydra.run.dir=$CHECKPOINT_DIR"
+            FINAL_TRAIN_ARGS="$FINAL_TRAIN_ARGS hydra.job.chdir=True hydra.run.dir=$CHECKPOINT_DIR"
             log_info "  添加Hydra输出目录重载: $CHECKPOINT_DIR"
         else
             # 传统配置，保持原有的--out_dir方式
