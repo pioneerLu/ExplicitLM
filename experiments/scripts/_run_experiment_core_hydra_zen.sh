@@ -109,7 +109,7 @@ HYDRA_OUTPUT_DIR=""
 # 前置检查 - 验证实验环境和依赖项
 ################################################################################
 check_prerequisites() {
-    log_info "步骤1/9: 前置检查..."
+    log_info "步骤1/11: 前置检查..."
 
     # 检查是否在Git仓库中
     if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
@@ -143,7 +143,7 @@ check_prerequisites() {
 # 记录代码版本（训练前） - 保存实验开始时的代码状态
 ################################################################################
 record_code_version() {
-    log_info "步骤2/9: 记录代码版本..."
+    log_info "步骤2/11: 记录代码版本..."
 
     # 记录当前HEAD的commit hash（训练前的代码状态）
     CODE_COMMIT=$(git rev-parse HEAD)
@@ -161,7 +161,7 @@ record_code_version() {
 # 数据版本切换和同步（细粒度） - 精确控制每个数据集的版本
 ################################################################################
 sync_data() {
-    log_info "步骤3/9: 数据版本切换和同步（细粒度）..."
+    log_info "步骤3/11: 数据版本切换和同步（细粒度）..."
 
     # 保存当前分支，同步完成后需要切回
     CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
@@ -220,7 +220,7 @@ sync_data() {
 # 记录实验元数据（训练前） - 保存实验配置和环境信息
 ################################################################################
 record_pre_training_meta() {
-    log_info "步骤4/9: 记录训练前元数据..."
+    log_info "步骤4/11: 记录训练前元数据..."
 
     # 生成UTC时间戳（用于实验记录）
     TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -255,7 +255,7 @@ EOF
 # 运行训练 - 执行模型训练过程
 ################################################################################
 run_training() {
-    log_info "步骤5/9: 开始训练..."
+    log_info "步骤5/11: 开始训练..."
 
     # 构建训练命令 - 使用hydra_zen格式的参数
     TRAIN_CMD="python 1_pretrain.py $TRAIN_ARGS"
@@ -279,7 +279,7 @@ run_training() {
 # 读取SwanLab URL - 获取训练过程中的实验监控URL
 ################################################################################
 get_swanlab_url() {
-    log_info "步骤6/9: 获取SwanLab实验URL..."
+    log_info "步骤7/11: 获取SwanLab实验URL..."
 
     # 从临时文件读取（需要1_pretrain.py配合写入）
     if [ -f "$SWANLAB_URL_FILE" ]; then
@@ -295,7 +295,7 @@ get_swanlab_url() {
 # 追踪模型权重 - 检查和验证生成的模型权重文件
 ################################################################################
 track_checkpoint() {
-    log_info "步骤7/9: 列出生成的模型权重文件..."
+    log_info "步骤8/11: 列出生成的模型权重文件..."
 
     # 使用find_hydra_output_dir函数设置的CHECKPOINT_DIR
     if [ -n "$CHECKPOINT_DIR" ] && [ -d "$CHECKPOINT_DIR" ] && [ "$(ls -A "$CHECKPOINT_DIR" 2>/dev/null)" ]; then
@@ -323,7 +323,7 @@ track_checkpoint() {
 # 生成实验记录文件 - 创建完整的实验记录用于复现和分析
 ################################################################################
 generate_record() {
-    log_info "步骤8.5/9: 生成实验记录文件..."
+    log_info "步骤9/11: 生成实验记录文件..."
 
     # 从训练参数中提取超参数（将hydra_zen格式转换为JSON）
     PARAMS_JSON=$(python3 -c "
@@ -445,7 +445,7 @@ EOF
 # 查找Hydra输出目录 - 训练完成后定位Hydra生成的输出目录
 ################################################################################
 find_hydra_output_dir() {
-    log_info "步骤8.4/9: 查找Hydra输出目录..."
+    log_info "步骤6/11: 查找Hydra输出目录..."
 
     # 查找包含.hydra文件夹的最新输出目录
     # 在outputs目录中搜索包含.hydra子目录的文件夹
@@ -481,7 +481,7 @@ find_hydra_output_dir() {
 ################################################################################
 track_experiment_output() {
     if [ -n "$HYDRA_OUTPUT_DIR" ] && [ -d "$HYDRA_OUTPUT_DIR" ]; then
-        log_info "步骤8.6/9: 追踪实验输出目录到DVC..."
+        log_info "步骤10/11: 追踪实验输出目录到DVC..."
         log_info "实验输出目录内容:"
         ls -la "$HYDRA_OUTPUT_DIR"
 
@@ -514,7 +514,7 @@ track_experiment_output() {
 # Git提交所有变更（一次性提交） - 将实验相关变更统一提交到版本控制
 ################################################################################
 commit_all_changes() {
-    log_info "步骤8.6/9: 提交所有变更到Git..."
+    log_info "步骤11/11: 提交所有变更到Git..."
 
     # 显示将要提交的变更
     echo ""
