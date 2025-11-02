@@ -85,9 +85,6 @@ fi
 ################################################################################
 log_info "开始训练..."
 
-# 清理旧的SwanLab URL文件（将在post阶段重新生成）
-rm -f "$SWANLAB_URL_FILE"
-rm -f "${PROJECT_ROOT}/.swanlab_url"
 
 # 使用pre脚本中生成的FINAL_COMMAND
 if [ -n "$FINAL_COMMAND" ]; then

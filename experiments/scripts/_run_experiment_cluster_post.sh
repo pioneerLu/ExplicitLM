@@ -54,9 +54,9 @@ else
     log_info "Git not available, using PROJECT_ROOT: $PROJECT_ROOT"
 fi
 STATE_FILE="${PROJECT_ROOT}/.cluster_state_${EXP_ID}"
-SWANLAB_URL_FILE="${PROJECT_ROOT}/.swanlab_url_${EXP_ID}"
 RECORD_FILE="${PROJECT_ROOT}/experiments/records/${EXP_ID}.json"
 META_FILE="${PROJECT_ROOT}/.experiment_meta_${EXP_ID}"
+# SWANLAB_URL_FILE将在加载状态文件后根据CHECKPOINT_DIR设置
 
 ################################################################################
 # 步骤1: 加载状态
@@ -66,6 +66,10 @@ log_info "步骤1/5: 加载状态..."
 if [ -f "$STATE_FILE" ]; then
     source "$STATE_FILE"
     log_success "状态已加载"
+
+    # 设置SWANLAB_URL_FILE在CHECKPOINT_DIR下
+    SWANLAB_URL_FILE="${CHECKPOINT_DIR}/.swanlab_url"
+    log_info "SwanLab URL文件路径: $SWANLAB_URL_FILE"
 else
     log_error "未找到状态文件: $STATE_FILE"
     log_info "请先运行前置脚本"
@@ -341,10 +345,10 @@ sync_swanlab_data() {
 
                         if [ -n "$extracted_url" ]; then
                             SWANLAB_URL="$extracted_url"
-                            # 保存到两个URL文件
+                            # 保存到CHECKPOINT_DIR下的URL文件
                             echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
-                            echo "$SWANLAB_URL" > "${PROJECT_ROOT}/.swanlab_url"
-                            log_success "SwanLab URL已保存: $SWANLAB_URL"
+                            log_success "SwanLab URL已保存到: $SWANLAB_URL_FILE"
+                            log_info "URL: $SWANLAB_URL"
                         else
                             log_warning "未能从同步输出中提取URL"
                             SWANLAB_URL="N/A"
@@ -425,7 +429,7 @@ log_success "所有变更已提交到Git"
 log_info "清理临时文件..."
 rm -f "$META_FILE"
 rm -f "$STATE_FILE"
-# 保留SwanLab URL文件供参考，不删除
+# 保留SwanLab URL文件在CHECKPOINT_DIR中供参考，不删除
 log_success "清理完成"
 
 echo ""
@@ -438,6 +442,7 @@ if [ -n "$HYDRA_OUTPUT_DIR" ]; then
     log_info "📋 记录文件 (Hydra): $HYDRA_OUTPUT_DIR/experiment_record_${EXP_ID}.json"
 fi
 log_info "🔬 SwanLab URL: $SWANLAB_URL"
+log_info "📝 SwanLab URL文件: $SWANLAB_URL_FILE"
 log_info "💾 Checkpoint: $CHECKPOINT_DIR"
 log_info "🏷️  代码版本: ${CODE_COMMIT:0:8}"
 log_info "📊 数据版本: ${DATABASE_COMMIT:0:8}"
