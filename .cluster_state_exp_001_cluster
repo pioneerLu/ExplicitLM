@@ -1,0 +1,26 @@
+# 集群实验状态文件 - exp_001_cluster
+# 生成时间: 2025-11-02T04:23:06Z
+
+# 实验配置
+export EXP_ID="exp_001_cluster"
+export EXP_DESC="基线实验 Hydra-Zen配置版 knowledge_num=1M epochs=10"
+export TRAIN_ARGS="training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4"
+
+# 处理后的训练参数
+export FINAL_TRAIN_ARGS="--out_dir /home/pci/ExplicitLM/outputs/2025-11-02/12-22-53_cluster training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4"
+export FINAL_COMMAND="accelerate launch 1_pretrain.py --out_dir /home/pci/ExplicitLM/outputs/2025-11-02/12-22-53_cluster training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4"
+
+# 版本信息
+export CODE_COMMIT="7adaab4cd7d8f44c2afc78fd869ffcdc5f95ed5b"
+export DATABASE_COMMIT="28065662dcc2fbccfb47ada4147452adeb00d905"
+export BENCHMARKS_COMMIT="cd7f9bb784c5dbfabf8193cbca40d66d99e3ba09"
+export EMBEDDINGS_COMMIT="N/A"
+export DATABASE_INIT_COMMIT="N/A"
+export CACHE_COMMIT="N/A"
+
+# 路径信息
+export PROJECT_ROOT="/home/pci/ExplicitLM"
+export CHECKPOINT_DIR="/home/pci/ExplicitLM/outputs/2025-11-02/12-22-53_cluster"
+export RECORD_FILE="/home/pci/ExplicitLM/experiments/records/exp_001_cluster.json"
+export META_FILE="/home/pci/ExplicitLM/.experiment_meta_exp_001_cluster"
+export TIMESTAMP="2025-11-02T04:23:06Z"

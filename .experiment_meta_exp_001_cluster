@@ -1,8 +1,8 @@
 {
   "experiment": {
-    "id": "exp_001 cluster",
+    "id": "exp_001_cluster",
     "description": "基线实验 Hydra-Zen配置版 knowledge_num=1M epochs=10",
-    "timestamp": "2025-11-02T04:20:25Z",
+    "timestamp": "2025-11-02T04:23:06Z",
     "mode": "cluster_pre"
   },
   "versions": {
@@ -17,8 +17,8 @@
   },
   "training": {
     "original_args": "training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4",
-    "final_args": "--out_dir /home/pci/ExplicitLM/outputs/2025-11-02/12-20-25_cluster training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4",
-    "output_dir": "/home/pci/ExplicitLM/outputs/2025-11-02/12-20-25_cluster",
-    "command": "accelerate launch 1_pretrain.py --out_dir /home/pci/ExplicitLM/outputs/2025-11-02/12-20-25_cluster training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4"
+    "final_args": "--out_dir /home/pci/ExplicitLM/outputs/2025-11-02/12-22-53_cluster training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4",
+    "output_dir": "/home/pci/ExplicitLM/outputs/2025-11-02/12-22-53_cluster",
+    "command": "accelerate launch 1_pretrain.py --out_dir /home/pci/ExplicitLM/outputs/2025-11-02/12-22-53_cluster training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4"
   }
 }

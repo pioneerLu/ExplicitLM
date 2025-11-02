@@ -48,10 +48,10 @@ fi
 # 路径定义
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 
-# 生成基于登录节点时间的CHECKPOINT_DIR
+# 生成基于登录节点时间的CHECKPOINT_DIR（添加cluster后缀）
 CURRENT_DATE=$(date '+%Y-%m-%d')
-CURRENT_TIME=$(date '+H-%M-%S')
-CHECKPOINT_DIR="${PROJECT_ROOT}/outputs/${CURRENT_DATE}/${CURRENT_TIME}"
+CURRENT_TIME=$(date '+%H-%M-%S')
+CHECKPOINT_DIR="${PROJECT_ROOT}/outputs/${CURRENT_DATE}/${CURRENT_TIME}_cluster"
 
 log_info "========================================="
 log_info "【集群模式 - 前置阶段】"
