@@ -28,36 +28,41 @@ set -e  # 遇到错误立即退出
 set -o pipefail  # 管道命令中任何一个失败都返回失败
 
 ################################################################################
-# 颜色定义
+# 颜色定义 - 用于终端输出着色
 ################################################################################
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+RED='\033[0;31m'      # 红色 - 错误信息
+GREEN='\033[0;32m'    # 绿色 - 成功信息
+YELLOW='\033[1;33m'   # 黄色 - 警告信息
+BLUE='\033[0;34m'     # 蓝色 - 普通信息
+NC='\033[0m'          # 重置颜色
 
 ################################################################################
-# 日志函数
+# 日志函数 - 格式化输出不同类型的信息
 ################################################################################
+# 输出普通信息
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
 }
 
+# 输出成功信息
 log_success() {
     echo -e "${GREEN}[SUCCESS]${NC} $1"
 }
 
+# 输出警告信息
 log_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
 }
 
+# 输出错误信息
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
 ################################################################################
-# 验证必需变量
+# 验证必需变量 - 确保调用脚本提供了必要的实验配置
 ################################################################################
+# 检查必需的环境变量是否已设置
 if [ -z "$EXP_ID" ] || [ -z "$EXP_DESC" ] || [ -z "$TRAIN_ARGS" ]; then
     log_error "缺少必需变量！"
     echo "需要在调用脚本中定义："
@@ -80,26 +85,28 @@ log_info "Hydra-Zen配置覆盖: $TRAIN_ARGS"
 log_info "========================================="
 
 ################################################################################
-# 目录和文件路径定义
+# 目录和文件路径定义 - 设置实验相关的各种路径变量
 ################################################################################
+# 项目根目录路径
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-# Will be updated to Hydra's out directory after training
+# Checkpoint目录路径（训练后更新为Hydra输出目录）
 CHECKPOINT_DIR=""
-# Use the Hydra output directory for the temporary record file
+# Hydra输出目录中的临时记录文件路径
 TEMP_RECORD_FILE=""
-# Generate timestamp for unique record filename
+# 生成时间戳用于创建唯一的记录文件名
 TIMESTAMP_FILENAME=$(date +"%Y%m%d_%H%M%S")
-# Permanent record file in experiments/records directory with timestamp
+# 永久记录文件路径（带时间戳确保唯一性）
 RECORD_FILE="${PROJECT_ROOT}/experiments/records/${EXP_ID}_${TIMESTAMP_FILENAME}.json"
-# SWANLAB_URL_FILE will be set after finding Hydra output directory
+# SwanLab URL文件路径（查找Hydra输出目录后设置）
 SWANLAB_URL_FILE=""
+# 实验元数据临时文件路径
 META_FILE="${PROJECT_ROOT}/.experiment_meta"
 
 # Hydra output directory will be detected after training
 HYDRA_OUTPUT_DIR=""
 
 ################################################################################
-# 前置检查
+# 前置检查 - 验证实验环境和依赖项
 ################################################################################
 check_prerequisites() {
     log_info "步骤1/9: 前置检查..."
@@ -116,7 +123,7 @@ check_prerequisites() {
         exit 1
     fi
 
-    # 创建records目录
+    # 创建实验记录目录
     mkdir -p "${PROJECT_ROOT}/experiments/records"
 
     # 检查实验ID是否已存在（检查相同EXP_ID前缀的记录）
@@ -133,7 +140,7 @@ check_prerequisites() {
 }
 
 ################################################################################
-# 记录代码版本（训练前）
+# 记录代码版本（训练前） - 保存实验开始时的代码状态
 ################################################################################
 record_code_version() {
     log_info "步骤2/9: 记录代码版本..."
@@ -151,12 +158,12 @@ record_code_version() {
 }
 
 ################################################################################
-# 数据版本切换和同步（细粒度）
+# 数据版本切换和同步（细粒度） - 精确控制每个数据集的版本
 ################################################################################
 sync_data() {
     log_info "步骤3/9: 数据版本切换和同步（细粒度）..."
 
-    # 保存当前分支
+    # 保存当前分支，同步完成后需要切回
     CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 
     # 同步函数：切换单个数据集到指定版本
@@ -168,24 +175,24 @@ sync_data() {
         if [ -n "$target_version" ]; then
             log_info "  - ${dataset_name}: 切换到版本 ${target_version:0:8}"
 
-            # 切换到指定commit
+            # 切换到指定commit以获取对应版本的数据集定义
             git checkout "$target_version" --quiet
 
-            # 仅checkout该数据集
+            # 仅checkout该数据集（使用DVC拉取对应版本的数据）
             dvc checkout "$dvc_file"
 
-            # 记录该数据集版本
+            # 记录该数据集版本（用于实验记录）
             eval "${dataset_name^^}_COMMIT=\"$target_version\""
 
-            # 切回当前分支
+            # 切回当前分支继续执行
             git checkout "$CURRENT_BRANCH" --quiet
         else
             log_info "  - ${dataset_name}: 使用当前版本"
 
-            # 仅checkout该数据集
+            # 仅checkout该数据集（使用DVC拉取当前版本的数据）
             dvc checkout "$dvc_file" 2>/dev/null || true
 
-            # 获取该数据集对应的Git commit
+            # 获取该数据集对应的Git commit（用于实验记录）
             local commit=$(git log -1 --format="%H" -- "$dvc_file" 2>/dev/null || echo "$CODE_COMMIT")
             eval "${dataset_name^^}_COMMIT=\"$commit\""
         fi
@@ -193,11 +200,11 @@ sync_data() {
 
     # 同步训练数据集
     sync_dataset "database" "$DATASET_VERSION"         # data/database.dvc (训练数据集)
-    
+
     # 同步验证数据集
     sync_dataset "benchmarks" "$VAL_DATASET_VERSION"   # data/benchmarks.dvc (验证数据集)
 
-    # 可选数据集（仅在项目使用且指定了版本时同步）
+    # 同步可选数据集（仅在项目使用且指定了版本时同步）
     [ -n "$EMBEDDING_VERSION" ] && [ -f "data/embeddings.dvc" ] && sync_dataset "embeddings" "$EMBEDDING_VERSION"      # data/embeddings.dvc (如果存在)
     [ -n "$DATABASE_VERSION" ] && [ -f "data/database_init.dvc" ] && sync_dataset "database_init" "$DATABASE_VERSION"    # data/database_init.dvc (如果存在)
     [ -n "$CACHE_VERSION" ] && [ -f "${PROJECT_ROOT}/cache.dvc" ] && sync_dataset "cache" "$CACHE_VERSION"                   # cache.dvc (如果存在)
@@ -210,15 +217,15 @@ sync_data() {
 }
 
 ################################################################################
-# 记录实验元数据（训练前）
+# 记录实验元数据（训练前） - 保存实验配置和环境信息
 ################################################################################
 record_pre_training_meta() {
     log_info "步骤4/9: 记录训练前元数据..."
 
-    # 生成时间戳
+    # 生成UTC时间戳（用于实验记录）
     TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-    # 记录到临时文件
+    # 记录到临时文件（JSON格式便于后续处理）
     cat > "$META_FILE" <<EOF
 {
   "experiment": {
@@ -245,7 +252,7 @@ EOF
 }
 
 ################################################################################
-# 运行训练
+# 运行训练 - 执行模型训练过程
 ################################################################################
 run_training() {
     log_info "步骤5/9: 开始训练..."
@@ -256,7 +263,7 @@ run_training() {
     log_info "执行命令: $TRAIN_CMD"
     echo ""
 
-    # 运行训练（不捕获输出，直接显示）
+    # 运行训练（直接显示输出，便于监控训练过程）
     eval $TRAIN_CMD
 
     # 检查训练是否成功
@@ -269,7 +276,7 @@ run_training() {
 }
 
 ################################################################################
-# 读取SwanLab URL
+# 读取SwanLab URL - 获取训练过程中的实验监控URL
 ################################################################################
 get_swanlab_url() {
     log_info "步骤6/9: 获取SwanLab实验URL..."
@@ -285,12 +292,12 @@ get_swanlab_url() {
 }
 
 ################################################################################
-# 追踪模型权重
+# 追踪模型权重 - 检查和验证生成的模型权重文件
 ################################################################################
 track_checkpoint() {
     log_info "步骤7/9: 列出生成的模型权重文件..."
 
-    # Use the CHECKPOINT_DIR that was already set by find_hydra_output_dir
+    # 使用find_hydra_output_dir函数设置的CHECKPOINT_DIR
     if [ -n "$CHECKPOINT_DIR" ] && [ -d "$CHECKPOINT_DIR" ] && [ "$(ls -A "$CHECKPOINT_DIR" 2>/dev/null)" ]; then
         TARGET_CHECKPOINT_DIR="$CHECKPOINT_DIR"
         log_info "使用Checkpoint目录: $TARGET_CHECKPOINT_DIR"
@@ -313,17 +320,17 @@ track_checkpoint() {
 }
 
 ################################################################################
-# 生成实验记录文件
+# 生成实验记录文件 - 创建完整的实验记录用于复现和分析
 ################################################################################
 generate_record() {
     log_info "步骤8.5/9: 生成实验记录文件..."
 
-    # Extract hyperparameters from TRAIN_ARGS (convert hydra_zen format to JSON)
+    # 从训练参数中提取超参数（将hydra_zen格式转换为JSON）
     PARAMS_JSON=$(python3 -c "
 import sys, json
 import re
 
-# Parse hydra_zen style arguments (key=value format)
+# 解析hydra_zen风格的参数（key=value格式）
 args_str = '$TRAIN_ARGS'
 pairs = args_str.split()
 
@@ -331,20 +338,20 @@ params = {}
 for pair in pairs:
     if '=' in pair:
         key, value = pair.split('=', 1)
-        # Try to convert to appropriate type
+        # 尝试转换为适当的类型
         try:
-            # Check if it's a numeric value first
+            # 首先检查是否为数值类型
             if '.' in value:
                 value = float(value)
             else:
                 value = int(value)
         except ValueError:
-            # Try boolean values
+            # 尝试布尔值转换
             if value.lower() == 'true':
                 value = True
             elif value.lower() == 'false':
                 value = False
-            # Keep as string otherwise
+            # 否则保持为字符串
             else:
                 pass
         params[key] = value
@@ -357,9 +364,9 @@ print(json.dumps(params, indent=2))
     CUDA_VERSION=$(nvcc --version 2>/dev/null | grep "release" | awk '{print $6}' | tr -d ',' || echo "N/A")
     NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo "0")
 
-    # Generate record file
+    # 生成记录文件
     log_info "生成实验记录文件..."
-    # 记录文件名（用于reproduction）
+    # 记录文件名（用于复现）
     RECORD_FILENAME=$(basename "$RECORD_FILE")
 
     cat > "$TEMP_RECORD_FILE" <<EOF
@@ -418,7 +425,7 @@ EOF
 
     log_success "实验记录已生成: $TEMP_RECORD_FILE"
 
-    # 复制记录到experiments/records目录
+    # 复制记录到experiments/records目录（永久保存）
     if [ -n "$TEMP_RECORD_FILE" ] && [ -f "$TEMP_RECORD_FILE" ]; then
         cp "$TEMP_RECORD_FILE" "$RECORD_FILE"
         log_success "实验记录已复制到: $RECORD_FILE"
@@ -435,34 +442,34 @@ EOF
 }
 
 ################################################################################
-# Find Hydra output directory after training
+# 查找Hydra输出目录 - 训练完成后定位Hydra生成的输出目录
 ################################################################################
 find_hydra_output_dir() {
     log_info "步骤8.4/9: 查找Hydra输出目录..."
 
-    # Look for the most recent output directory containing .hydra folder
-    # Search in outputs directory for folders with .hydra subdirectory
+    # 查找包含.hydra文件夹的最新输出目录
+    # 在outputs目录中搜索包含.hydra子目录的文件夹
     local hydra_dirs=$(find "${PROJECT_ROOT}/outputs" -name ".hydra" -type d -printf "%h\n" 2>/dev/null | sort -r | head -n 1)
 
     if [ -n "$hydra_dirs" ] && [ -d "$hydra_dirs" ]; then
         HYDRA_OUTPUT_DIR="$hydra_dirs"
         log_success "找到Hydra输出目录: $HYDRA_OUTPUT_DIR"
 
-        # Set SWANLAB_URL_FILE to be inside Hydra output directory
+        # 设置SWANLAB_URL_FILE为Hydra输出目录中的文件
         SWANLAB_URL_FILE="${HYDRA_OUTPUT_DIR}/.swanlab_url"
 
-        # Update CHECKPOINT_DIR to point to the Hydra output's 'out' directory
+        # 更新CHECKPOINT_DIR指向Hydra输出目录的out子目录
         if [ -d "$HYDRA_OUTPUT_DIR/out" ]; then
             CHECKPOINT_DIR="$HYDRA_OUTPUT_DIR/out"
             log_info "更新CHECKPOINT_DIR到Hydra输出目录: $CHECKPOINT_DIR"
         fi
 
-        # Set TEMP_RECORD_FILE to be inside Hydra output directory
+        # 设置TEMP_RECORD_FILE为Hydra输出目录中的文件
         TEMP_RECORD_FILE="${HYDRA_OUTPUT_DIR}/experiment_record_${EXP_ID}.json"
     else
         log_warning "未找到Hydra输出目录，使用默认目录"
         HYDRA_OUTPUT_DIR=""
-        # Fallback to project root if no Hydra directory found
+        # 如果没有找到Hydra目录，回退到项目根目录
         SWANLAB_URL_FILE="${PROJECT_ROOT}/.swanlab_url"
         TEMP_RECORD_FILE=""
     fi
@@ -470,7 +477,7 @@ find_hydra_output_dir() {
 
 
 ################################################################################
-# 追踪实验输出目录到DVC
+# 追踪实验输出目录到DVC - 使用DVC管理实验输出以支持版本控制
 ################################################################################
 track_experiment_output() {
     if [ -n "$HYDRA_OUTPUT_DIR" ] && [ -d "$HYDRA_OUTPUT_DIR" ]; then
@@ -504,7 +511,7 @@ track_experiment_output() {
 }
 
 ################################################################################
-# Git提交所有变更（一次性提交）
+# Git提交所有变更（一次性提交） - 将实验相关变更统一提交到版本控制
 ################################################################################
 commit_all_changes() {
     log_info "步骤8.6/9: 提交所有变更到Git..."
@@ -515,10 +522,10 @@ commit_all_changes() {
     git status --short
     echo ""
 
-    # 添加所有变更
+    # 添加所有变更到暂存区
     git add -A
 
-    # 提交（使用实验ID和描述）
+    # 提交变更（使用实验ID和描述作为提交信息）
     git commit -m "exp: ${EXP_ID} - ${EXP_DESC}"
 
     log_success "所有变更已提交到Git"
@@ -533,7 +540,7 @@ commit_all_changes() {
 }
 
 ################################################################################
-# 清理临时文件
+# 清理临时文件 - 删除实验过程中生成的临时文件
 ################################################################################
 cleanup() {
     log_info "清理临时文件..."
@@ -543,7 +550,7 @@ cleanup() {
 }
 
 ################################################################################
-# 实验总结
+# 实验总结 - 显示实验执行结果和关键信息
 ################################################################################
 print_summary() {
     echo ""
@@ -572,7 +579,7 @@ print_summary() {
 }
 
 ################################################################################
-# 主流程
+# 主流程 - 按顺序执行所有实验步骤
 ################################################################################
 main() {
     check_prerequisites
