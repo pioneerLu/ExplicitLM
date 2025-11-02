@@ -55,7 +55,6 @@ else
 fi
 STATE_FILE="${PROJECT_ROOT}/.cluster_state_${EXP_ID}"
 SWANLAB_URL_FILE="${PROJECT_ROOT}/.swanlab_url_${EXP_ID}"
-CHECKPOINT_DIR="${PROJECT_ROOT}/checkpoints/${EXP_ID}"
 RECORD_FILE="${PROJECT_ROOT}/experiments/records/${EXP_ID}.json"
 META_FILE="${PROJECT_ROOT}/.experiment_meta_${EXP_ID}"
 
@@ -145,20 +144,28 @@ track_hydra_output() {
         log_info "Hydra输出目录内容:"
         ls -la "$HYDRA_OUTPUT_DIR"
 
-        # DVC追踪Hydra输出目录
-        dvc add "$HYDRA_OUTPUT_DIR"
-
-        # Get DVC file path for Hydra output
-        HYDRA_OUTPUT_DVC="${HYDRA_OUTPUT_DIR}.dvc"
-
-        if [ -f "$HYDRA_OUTPUT_DVC" ]; then
-            HYDRA_OUTPUT_HASH=$(grep "md5:" "$HYDRA_OUTPUT_DVC" | awk '{print $2}')
-            log_success "Hydra输出DVC追踪完成 (Hash: ${HYDRA_OUTPUT_HASH:0:8})"
+        # 为整个实验目录创建DVC追踪
+        log_info "开始DVC追踪实验目录: $HYDRA_OUTPUT_DIR"
+        if dvc add "$HYDRA_OUTPUT_DIR" 2>/dev/null; then
+            HYDRA_OUTPUT_DVC="${HYDRA_OUTPUT_DIR}.dvc"
+            if [ -f "$HYDRA_OUTPUT_DVC" ]; then
+                HYDRA_OUTPUT_HASH=$(grep "md5:" "$HYDRA_OUTPUT_DVC" | awk '{print $3}')
+                log_success "Hydra输出DVC追踪完成 (Hash: ${HYDRA_OUTPUT_HASH:0:8})"
+                log_info "DVC文件: $HYDRA_OUTPUT_DVC"
+            else
+                log_warning "DVC追踪完成但未找到元文件: $HYDRA_OUTPUT_DVC"
+            fi
         else
-            log_warning "Hydra输出DVC文件生成失败 (可能目录为空或无变化): $HYDRA_OUTPUT_DVC"
+            log_warning "DVC追踪失败，可能目录已被管理或无变更: $HYDRA_OUTPUT_DIR"
+            # 检查是否已经有.dvc文件
+            HYDRA_OUTPUT_DVC="${HYDRA_OUTPUT_DIR}.dvc"
+            if [ -f "$HYDRA_OUTPUT_DVC" ]; then
+                HYDRA_OUTPUT_HASH=$(grep "md5:" "$HYDRA_OUTPUT_DVC" | awk '{print $3}')
+                log_info "使用现有DVC追踪 (Hash: ${HYDRA_OUTPUT_HASH:0:8})"
+            fi
         fi
     else
-        log_info "Hydra输出目录不存在，跳过追踪"
+        log_info "Hydra输出目录不存在，跳过DVC追踪"
     fi
 }
 

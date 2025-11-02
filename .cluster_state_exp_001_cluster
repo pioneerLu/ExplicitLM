@@ -1,5 +1,5 @@
 # 集群实验状态文件 - exp_001_cluster
-# 生成时间: 2025-11-02T05:33:14Z
+# 生成时间: 2025-11-02T05:46:47Z
 
 # 实验配置
 export EXP_ID="exp_001_cluster"
@@ -7,11 +7,11 @@ export EXP_DESC="基线实验 Hydra-Zen配置版 knowledge_num=1M epochs=10"
 export TRAIN_ARGS="training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4"
 
 # 处理后的训练参数
-export FINAL_TRAIN_ARGS="training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4 hydra.job.chdir=True hydra.run.dir=/home/pci/ExplicitLM/outputs/2025-11-02/13-33-13_cluster"
-export FINAL_COMMAND="accelerate launch 1_pretrain.py training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4 hydra.job.chdir=True hydra.run.dir=/home/pci/ExplicitLM/outputs/2025-11-02/13-33-13_cluster"
+export FINAL_TRAIN_ARGS="training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4 hydra.job.chdir=True hydra.run.dir=/home/pci/ExplicitLM/outputs/2025-11-02/13-46-45_cluster"
+export FINAL_COMMAND="accelerate launch 1_pretrain.py training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4 hydra.job.chdir=True hydra.run.dir=/home/pci/ExplicitLM/outputs/2025-11-02/13-46-45_cluster"
 
 # 版本信息
-export CODE_COMMIT="d51c40362855296a3ea86e71d1d3965392c8f8c9"
+export CODE_COMMIT="bf64ea3931fb9e0c57c392487471ea68c899c38a"
 export DATABASE_COMMIT="28065662dcc2fbccfb47ada4147452adeb00d905"
 export BENCHMARKS_COMMIT="cd7f9bb784c5dbfabf8193cbca40d66d99e3ba09"
 export EMBEDDINGS_COMMIT="N/A"
@@ -20,7 +20,7 @@ export CACHE_COMMIT="N/A"
 
 # 路径信息
 export PROJECT_ROOT="/home/pci/ExplicitLM"
-export CHECKPOINT_DIR="/home/pci/ExplicitLM/outputs/2025-11-02/13-33-13_cluster"
+export CHECKPOINT_DIR="/home/pci/ExplicitLM/outputs/2025-11-02/13-46-45_cluster"
 export RECORD_FILE="/home/pci/ExplicitLM/experiments/records/exp_001_cluster.json"
 export META_FILE="/home/pci/ExplicitLM/.experiment_meta_exp_001_cluster"
-export TIMESTAMP="2025-11-02T05:33:14Z"
+export TIMESTAMP="2025-11-02T05:46:47Z"
