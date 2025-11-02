@@ -199,9 +199,93 @@ track_hydra_output() {
 find_hydra_output_dir
 
 ################################################################################
-# 步骤5: 生成实验记录文件 - 创建完整的实验元数据记录
+# 步骤5: 同步SwanLab实验数据 - 将本地实验结果上传到SwanLab平台
 ################################################################################
-log_info "步骤5/7: 生成实验记录文件..."
+sync_swanlab_data() {
+    log_info "步骤5/8: 检查并同步SwanLab实验数据..."
+
+    # 检查是否在训练参数中启用了SwanLab实验跟踪功能
+    if [[ "$TRAIN_ARGS" == *"--use_swanlab"* ]] || [[ "$TRAIN_ARGS" == *"use_swanlab=True"* ]]; then
+        # 检查系统中是否安装了swanlab命令行工具
+        if command -v swanlab &> /dev/null; then
+            # 查找SwanLab数据目录（通常在Hydra输出目录中的swanlog子目录）
+            if [ -n "$HYDRA_OUTPUT_DIR" ] && [ -d "$HYDRA_OUTPUT_DIR/swanlog" ]; then
+                log_info "找到SwanLab日志目录: $HYDRA_OUTPUT_DIR/swanlog"
+
+                # 查找具体的run-*目录（SwanLab为每次运行创建的独立子目录）
+                local run_dir=$(find "$HYDRA_OUTPUT_DIR/swanlog" -name "run-*" -type d | head -n 1)
+
+                if [ -n "$run_dir" ] && [ -d "$run_dir" ]; then
+                    log_info "找到SwanLab运行目录: $run_dir"
+
+                    # 尝试执行SwanLab数据同步命令并捕获完整输出
+                    log_info "执行SwanLab数据同步命令..."
+                    local sync_output
+                    if sync_output=$(swanlab sync "$run_dir" 2>&1); then
+                        log_success "SwanLab数据同步成功"
+
+                        # 从同步命令的输出中提取实验查看URL
+                        local extracted_url
+                        extracted_url=$(echo "$sync_output" | grep -oE 'https?://[^[:space:]]+' | head -n 1 || echo "")
+
+                        if [ -n "$extracted_url" ]; then
+                            # 成功提取到URL，保存到全局变量和文件中
+                            SWANLAB_URL="$extracted_url"
+                            # 将URL保存到CHECKPOINT_DIR下的URL文件，便于后续查看
+                            echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
+                            log_success "SwanLab实验URL已保存到: $SWANLAB_URL_FILE"
+                            log_info "在线查看URL: $SWANLAB_URL"
+                        else
+                            # 未能提取到URL，设置为默认值
+                            log_warning "未能从同步输出中提取实验URL"
+                            SWANLAB_URL="N/A"
+                            echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
+                        fi
+
+                        # 显示同步输出的详细信息（前5行）
+                        log_info "同步输出详情:"
+                        echo "$sync_output" | head -5
+                    else
+                        # SwanLab同步命令执行失败
+                        log_warning "SwanLab同步失败，可能没有网络连接或实验数据为空"
+                        SWANLAB_URL="N/A"
+                        echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
+                        # 显示错误输出信息（前3行）
+                        log_info "错误输出详情:"
+                        echo "$sync_output" | head -3
+                    fi
+                else
+                    # 未找到SwanLab运行目录
+                    log_warning "未找到SwanLab运行目录 (run-*)，跳过数据同步"
+                    SWANLAB_URL="N/A"
+                    echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
+                fi
+            else
+                # 未找到SwanLab日志目录
+                log_info "未找到SwanLab日志目录，跳过数据同步"
+                SWANLAB_URL="N/A"
+                echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
+            fi
+        else
+            # 系统中未安装swanlab命令
+            log_info "SwanLab命令行工具未安装，跳过数据同步"
+            SWANLAB_URL="N/A"
+            echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
+        fi
+    else
+        # 训练参数中未启用SwanLab
+        log_info "训练参数中未启用SwanLab，跳过数据同步"
+        SWANLAB_URL="N/A"
+        echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
+    fi
+}
+
+sync_swanlab_data
+
+################################################################################
+# 步骤6: 生成实验记录文件 - 创建完整的实验元数据记录
+################################################################################
+log_info "步骤6/8: 生成实验记录文件..."
 
 # 提取训练参数为JSON格式，增强错误处理能力
 if command -v python3 >/dev/null 2>&1; then
@@ -360,94 +444,12 @@ fi
 log_info "=================================="
 echo ""
 
-################################################################################
-# 步骤6: 同步SwanLab实验数据 - 将本地实验结果上传到SwanLab平台
-################################################################################
-sync_swanlab_data() {
-    log_info "步骤6/7: 检查并同步SwanLab实验数据..."
 
-    # 检查是否在训练参数中启用了SwanLab实验跟踪功能
-    if [[ "$TRAIN_ARGS" == *"--use_swanlab"* ]] || [[ "$TRAIN_ARGS" == *"use_swanlab=True"* ]]; then
-        # 检查系统中是否安装了swanlab命令行工具
-        if command -v swanlab &> /dev/null; then
-            # 查找SwanLab数据目录（通常在Hydra输出目录中的swanlog子目录）
-            if [ -n "$HYDRA_OUTPUT_DIR" ] && [ -d "$HYDRA_OUTPUT_DIR/swanlog" ]; then
-                log_info "找到SwanLab日志目录: $HYDRA_OUTPUT_DIR/swanlog"
-
-                # 查找具体的run-*目录（SwanLab为每次运行创建的独立子目录）
-                local run_dir=$(find "$HYDRA_OUTPUT_DIR/swanlog" -name "run-*" -type d | head -n 1)
-
-                if [ -n "$run_dir" ] && [ -d "$run_dir" ]; then
-                    log_info "找到SwanLab运行目录: $run_dir"
-
-                    # 尝试执行SwanLab数据同步命令并捕获完整输出
-                    log_info "执行SwanLab数据同步命令..."
-                    local sync_output
-                    if sync_output=$(swanlab sync "$run_dir" 2>&1); then
-                        log_success "SwanLab数据同步成功"
-
-                        # 从同步命令的输出中提取实验查看URL
-                        local extracted_url
-                        extracted_url=$(echo "$sync_output" | grep -oE 'https?://[^[:space:]]+' | head -n 1 || echo "")
-
-                        if [ -n "$extracted_url" ]; then
-                            # 成功提取到URL，保存到全局变量和文件中
-                            SWANLAB_URL="$extracted_url"
-                            # 将URL保存到CHECKPOINT_DIR下的URL文件，便于后续查看
-                            echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
-                            log_success "SwanLab实验URL已保存到: $SWANLAB_URL_FILE"
-                            log_info "在线查看URL: $SWANLAB_URL"
-                        else
-                            # 未能提取到URL，设置为默认值
-                            log_warning "未能从同步输出中提取实验URL"
-                            SWANLAB_URL="N/A"
-                            echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
-                        fi
-
-                        # 显示同步输出的详细信息（前5行）
-                        log_info "同步输出详情:"
-                        echo "$sync_output" | head -5
-                    else
-                        # SwanLab同步命令执行失败
-                        log_warning "SwanLab同步失败，可能没有网络连接或实验数据为空"
-                        SWANLAB_URL="N/A"
-                        echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
-                        # 显示错误输出信息（前3行）
-                        log_info "错误输出详情:"
-                        echo "$sync_output" | head -3
-                    fi
-                else
-                    # 未找到SwanLab运行目录
-                    log_warning "未找到SwanLab运行目录 (run-*)，跳过数据同步"
-                    SWANLAB_URL="N/A"
-                    echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
-                fi
-            else
-                # 未找到SwanLab日志目录
-                log_info "未找到SwanLab日志目录，跳过数据同步"
-                SWANLAB_URL="N/A"
-                echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
-            fi
-        else
-            # 系统中未安装swanlab命令
-            log_info "SwanLab命令行工具未安装，跳过数据同步"
-            SWANLAB_URL="N/A"
-            echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
-        fi
-    else
-        # 训练参数中未启用SwanLab
-        log_info "训练参数中未启用SwanLab，跳过数据同步"
-        SWANLAB_URL="N/A"
-        echo "$SWANLAB_URL" > "$SWANLAB_URL_FILE"
-    fi
-}
-
-sync_swanlab_data
 
 ################################################################################
 # 步骤7: Git提交所有变更 - 将实验结果和配置纳入版本控制
 ################################################################################
-log_info "步骤7/7: 提交实验变更到Git..."
+log_info "步骤7/8: 提交实验变更到Git..."
 
 echo ""
 log_info "将要提交的变更内容："
