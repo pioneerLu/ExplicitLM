@@ -54,7 +54,7 @@ else
     log_info "Git not available, using PROJECT_ROOT: $PROJECT_ROOT"
 fi
 STATE_FILE="${PROJECT_ROOT}/.cluster_state_${EXP_ID}"
-RECORD_FILE="${PROJECT_ROOT}/experiments/records/${EXP_ID}.json"
+# 在加载状态后，将基于状态中的TIMESTAMP设置RECORD_FILE
 META_FILE="${PROJECT_ROOT}/.experiment_meta_${EXP_ID}"
 # SWANLAB_URL_FILE将在加载状态文件后根据CHECKPOINT_DIR设置
 
@@ -70,6 +70,16 @@ if [ -f "$STATE_FILE" ]; then
     # 设置SWANLAB_URL_FILE在CHECKPOINT_DIR下
     SWANLAB_URL_FILE="${CHECKPOINT_DIR}/.swanlab_url"
     log_info "SwanLab URL文件路径: $SWANLAB_URL_FILE"
+
+    # 设置RECORD_FILE，使用状态文件中的时间戳
+    if [ -n "$TIMESTAMP_FILENAME" ]; then
+        RECORD_FILE="${PROJECT_ROOT}/experiments/records/${EXP_ID}_${TIMESTAMP_FILENAME}.json"
+    else
+        # 如果状态中没有时间戳，使用当前时间
+        TIMESTAMP_FILENAME=$(date +"%Y%m%d_%H%M%S")
+        RECORD_FILE="${PROJECT_ROOT}/experiments/records/${EXP_ID}_${TIMESTAMP_FILENAME}.json"
+    fi
+    log_info "记录文件路径: $RECORD_FILE"
 else
     log_error "未找到状态文件: $STATE_FILE"
     log_info "请先运行前置脚本"
@@ -246,6 +256,7 @@ cat > "$RECORD_FILE" <<EOF
     "id": "$EXP_ID",
     "description": "$EXP_DESC",
     "timestamp": "$TIMESTAMP",
+    "record_filename": "$(basename "$RECORD_FILE")",
     "mode": "cluster",
     "script": "cluster_experiment.sh",
     "command": "accelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS"
@@ -406,7 +417,7 @@ if git add -A 2>/dev/null; then
     if git commit -m "exp: ${EXP_ID} - ${EXP_DESC}" 2>/dev/null; then
         log_success "所有变更已提交到Git"
         log_info "Commit包含："
-        log_info "  - 实验记录文件: $RECORD_FILE"
+        log_info "  - 实验记录文件 (Records): $RECORD_FILE"
         log_info "  - Checkpoint目录: $CHECKPOINT_DIR (已包含在outputs目录的DVC管理中)"
         if [ -n "$HYDRA_OUTPUT_DIR" ] && [ -f "${HYDRA_OUTPUT_DIR}.dvc" ]; then
             log_info "  - Hydra输出DVC元文件: ${HYDRA_OUTPUT_DIR}.dvc"
@@ -437,7 +448,7 @@ log_success "========================================="
 log_success "   实验 ${EXP_ID} 全部完成！"
 log_success "========================================="
 echo ""
-log_info "📋 记录文件: $RECORD_FILE"
+log_info "📋 记录文件 (Records): $RECORD_FILE"
 if [ -n "$HYDRA_OUTPUT_DIR" ]; then
     log_info "📋 记录文件 (Hydra): $HYDRA_OUTPUT_DIR/experiment_record_${EXP_ID}.json"
 fi

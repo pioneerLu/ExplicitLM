@@ -60,7 +60,9 @@ log_info "实验描述: $EXP_DESC"
 log_info "输出目录: $CHECKPOINT_DIR"
 log_info "========================================="
 
-RECORD_FILE="${PROJECT_ROOT}/experiments/records/${EXP_ID}.json"
+# 生成时间戳用于唯一记录文件名
+TIMESTAMP_FILENAME=$(date +"%Y%m%d_%H%M%S")
+RECORD_FILE="${PROJECT_ROOT}/experiments/records/${EXP_ID}_${TIMESTAMP_FILENAME}.json"
 META_FILE="${PROJECT_ROOT}/.experiment_meta_${EXP_ID}"
 STATE_FILE="${PROJECT_ROOT}/.cluster_state_${EXP_ID}"
 
@@ -79,14 +81,14 @@ if [ ! -d "${PROJECT_ROOT}/.dvc" ]; then
     exit 1
 fi
 
-if [ -f "$RECORD_FILE" ]; then
-    log_error "实验ID ${EXP_ID} 已存在！"
-    log_info "现有记录文件: $RECORD_FILE"
-    read -p "是否覆盖？(y/N): " confirm
-    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
-        log_info "取消实验"
-        exit 0
-    fi
+# 检查实验ID是否已存在（检查相同EXP_ID前缀的记录）
+existing_records=$(find "${PROJECT_ROOT}/experiments/records" -name "${EXP_ID}_*.json" 2>/dev/null)
+if [ -n "$existing_records" ]; then
+    log_warning "实验ID ${EXP_ID} 已有历史记录："
+    echo "$existing_records" | while read -r record; do
+        log_info "  - $record"
+    done
+    log_info "将创建新的带时间戳的记录文件: $RECORD_FILE"
 fi
 
 mkdir -p "${PROJECT_ROOT}/experiments/records"
@@ -328,6 +330,8 @@ export CHECKPOINT_DIR="$CHECKPOINT_DIR"
 export RECORD_FILE="$RECORD_FILE"
 export META_FILE="$META_FILE"
 export TIMESTAMP="$TIMESTAMP"
+# 时间戳信息（用于唯一记录文件名）
+export TIMESTAMP_FILENAME="$TIMESTAMP_FILENAME"
 EOF
 
 log_success "状态已保存: $STATE_FILE"
