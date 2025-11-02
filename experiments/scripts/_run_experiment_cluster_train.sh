@@ -91,14 +91,15 @@ rm -f "${PROJECT_ROOT}/.swanlab_url"
 
 # 使用pre脚本中生成的FINAL_COMMAND
 if [ -n "$FINAL_COMMAND" ]; then
-    TRAIN_CMD="$FINAL_COMMAND"
+    TRAIN_CMD="$FINAL_COMMAND logging.swanlab_online=False"
     log_info "使用预构建的训练命令: $TRAIN_CMD"
 else
     # 如果FINAL_COMMAND不存在，则回退到原来的构建方式
     log_warning "FINAL_COMMAND未定义，使用回退构建方式"
     if [[ "$TRAIN_ARGS" == *"--use_swanlab"* ]] || [[ "$TRAIN_ARGS" == *"use_swanlab=True"* ]]; then
-        TRAIN_CMD="accelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS"
-        log_info "SwanLab已启用，训练命令: accelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS"
+        # 在集群环境中禁用SwanLab在线功能（因为训练节点无网络）
+        TRAIN_CMD="accelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS logging.swanlab_online=False"
+        log_info "SwanLab已启用（离线模式），训练命令: accelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS logging.swanlab_online=False"
     else
         TRAIN_CMD="accelerate launch 1_pretrain.py --out_dir $CHECKPOINT_DIR $TRAIN_ARGS"
         log_info "SwanLab未启用，训练命令: $TRAIN_CMD"

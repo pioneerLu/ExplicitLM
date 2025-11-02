@@ -316,9 +316,49 @@ log_info "=================================="
 echo ""
 
 ################################################################################
-# 步骤6: Git提交所有变更
+# 步骤6: 同步SwanLab数据（如果启用且可用）
 ################################################################################
-log_info "步骤6/6: 提交到Git..."
+sync_swanlab_data() {
+    log_info "步骤6/7: 检查并同步SwanLab数据..."
+
+    # 检查是否启用了SwanLab
+    if [[ "$TRAIN_ARGS" == *"--use_swanlab"* ]] || [[ "$TRAIN_ARGS" == *"use_swanlab=True"* ]]; then
+        # 检查swanlab命令是否可用
+        if command -v swanlab &> /dev/null; then
+            # 查找SwanLab数据目录（通常在输出目录中的swanlog子目录）
+            if [ -n "$HYDRA_OUTPUT_DIR" ] && [ -d "$HYDRA_OUTPUT_DIR/swanlog" ]; then
+                log_info "找到SwanLab日志目录: $HYDRA_OUTPUT_DIR/swanlog"
+
+                # 尝试同步SwanLab数据
+                log_info "执行SwanLab同步命令..."
+                if swanlab sync "$HYDRA_OUTPUT_DIR/swanlog"; then
+                    log_success "SwanLab数据同步成功"
+
+                    # 获取同步后的URL
+                    if [ -f "$SWANLAB_URL_FILE" ]; then
+                        SWANLAB_URL=$(cat "$SWANLAB_URL_FILE")
+                        log_info "SwanLab URL: $SWANLAB_URL"
+                    fi
+                else
+                    log_warning "SwanLab同步失败，可能没有网络连接或数据为空"
+                fi
+            else
+                log_info "未找到SwanLab日志目录，跳过同步"
+            fi
+        else
+            log_info "SwanLab命令不可用，跳过同步"
+        fi
+    else
+        log_info "SwanLab未启用，跳过同步"
+    fi
+}
+
+sync_swanlab_data
+
+################################################################################
+# 步骤7: Git提交所有变更
+################################################################################
+log_info "步骤7/7: 提交到Git..."
 
 echo ""
 log_info "将要提交的变更："

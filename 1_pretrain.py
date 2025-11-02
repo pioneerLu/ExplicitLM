@@ -58,7 +58,7 @@ def main(cfg):
 
     swanlab_run = None
     if l_cfg.use_swanlab and accelerator.is_main_process and swanlab is not None:
-        mode = "cloud" if l_cfg.swanlab_online else "local"
+        mode = "cloud" if l_cfg.swanlab_online else "offline"
         Logger(f"SwanLab 模式：{mode}", accelerator)
         Logger(f"SwanLab 运行中...", accelerator)
         swanlab_run = swanlab.init(
