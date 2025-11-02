@@ -87,7 +87,8 @@ PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 CHECKPOINT_DIR=""
 # Use the Hydra output directory for the record file
 TEMP_RECORD_FILE=""
-SWANLAB_URL_FILE="${PROJECT_ROOT}/.swanlab_url"
+# SWANLAB_URL_FILE will be set after finding Hydra output directory
+SWANLAB_URL_FILE=""
 META_FILE="${PROJECT_ROOT}/.experiment_meta"
 
 # Hydra output directory will be detected after training
@@ -238,9 +239,6 @@ EOF
 run_training() {
     log_info "步骤5/9: 开始训练..."
 
-    # 清理旧的SwanLab URL文件
-    rm -f "$SWANLAB_URL_FILE"
-
     # 构建训练命令 - 使用hydra_zen格式的参数
     TRAIN_CMD="python 1_pretrain.py $TRAIN_ARGS"
 
@@ -279,20 +277,14 @@ get_swanlab_url() {
 # 追踪模型权重
 ################################################################################
 track_checkpoint() {
-    log_info "步骤7/9: 追踪模型权重到DVC..."
+    log_info "步骤7/9: 列出生成的模型权重文件..."
 
-    # Check if Hydra output directory exists (search for most recent)
-    local hydra_out_dir=$(find "${PROJECT_ROOT}/outputs" -name ".hydra" -type d -printf "%h\n" 2>/dev/null | sort -r | head -n 1)
-
-    # Use Hydra output directory
-    TARGET_CHECKPOINT_DIR=""
-
-    # If Hydra output directory with 'out' subdirectory exists and has content, use that
-    if [ -n "$hydra_out_dir" ] && [ -d "$hydra_out_dir/out" ] && [ "$(ls -A "$hydra_out_dir/out" 2>/dev/null)" ]; then
-        TARGET_CHECKPOINT_DIR="$hydra_out_dir/out"
-        log_info "发现Hydra输出目录，将追踪: $TARGET_CHECKPOINT_DIR"
+    # Use the CHECKPOINT_DIR that was already set by find_hydra_output_dir
+    if [ -n "$CHECKPOINT_DIR" ] && [ -d "$CHECKPOINT_DIR" ] && [ "$(ls -A "$CHECKPOINT_DIR" 2>/dev/null)" ]; then
+        TARGET_CHECKPOINT_DIR="$CHECKPOINT_DIR"
+        log_info "使用Checkpoint目录: $TARGET_CHECKPOINT_DIR"
     else
-        log_error "未找到Hydra输出目录或checkpoint目录为空"
+        log_error "Checkpoint目录不存在或为空: $CHECKPOINT_DIR"
         exit 1
     fi
 
@@ -306,83 +298,14 @@ track_checkpoint() {
     log_info "生成的checkpoint文件:"
     ls -lh "$TARGET_CHECKPOINT_DIR"
 
-    # Check if the target directory is already under DVC management (as part of a parent directory)
-    local parent_dir="$TARGET_CHECKPOINT_DIR"
-    local found_dvc=false
-    
-    # Walk up the directory tree to check if this directory is part of a DVC-tracked parent
-    while [ "$parent_dir" != "/" ]; do
-        if [ -f "${parent_dir}.dvc" ]; then
-            # Found a parent DVC file that may include this directory
-            CHECKPOINT_DVC="${parent_dir}.dvc"
-            if [ -f "$CHECKPOINT_DVC" ]; then
-                # Extract the hash from the parent DVC file
-                CHECKPOINT_HASH=$(grep "md5:" "$CHECKPOINT_DVC" | head -n1 | awk '{print $2}')
-                if [ -n "$CHECKPOINT_HASH" ]; then
-                    # Update the global CHECKPOINT_DIR variable to the actual directory used
-                    CHECKPOINT_DIR="$TARGET_CHECKPOINT_DIR"
-                    log_success "使用父目录DVC追踪 (Hash: ${CHECKPOINT_HASH:0:8})"
-                    found_dvc=true
-                    break
-                fi
-            fi
-        fi
-        parent_dir=$(dirname "$parent_dir")
-        # Safety check to avoid infinite loop
-        if [ "$parent_dir" = "/" ] || [ "$parent_dir" = "." ]; then
-            break
-        fi
-    done
-
-    # If no parent DVC file found, try the original approach (but more gracefully)
-    if [ "$found_dvc" = false ]; then
-        # Check if this directory is specifically tracked in DVC
-        if dvc status 2>/dev/null | grep -q "$TARGET_CHECKPOINT_DIR"; then
-            # Directory is already tracked, try to find its DVC file
-            if [ -f "${TARGET_CHECKPOINT_DIR}.dvc" ]; then
-                CHECKPOINT_DVC="${TARGET_CHECKPOINT_DIR}.dvc"
-                CHECKPOINT_HASH=$(grep "md5:" "$CHECKPOINT_DVC" | awk '{print $2}')
-                CHECKPOINT_DIR="$TARGET_CHECKPOINT_DIR"
-                log_success "DVC追踪完成 (Hash: ${CHECKPOINT_HASH:0:8})"
-            else
-                # If not directly tracked but part of DVC workspace, we can still proceed
-                log_info "目录在DVC工作区中，但可能作为父目录的一部分被管理"
-                # Generate a placeholder hash or skip DVC tracking for this step
-                CHECKPOINT_DVC="${TARGET_CHECKPOINT_DIR}.dvc"
-                CHECKPOINT_HASH="dvc_managed_$(basename "$TARGET_CHECKPOINT_DIR" | md5sum | cut -d' ' -f1 | head -c8)"
-                CHECKPOINT_DIR="$TARGET_CHECKPOINT_DIR"
-            fi
-        else
-            # Try to add to DVC as before, but handle errors gracefully
-            if dvc add "$TARGET_CHECKPOINT_DIR" 2>/dev/null; then
-                CHECKPOINT_DVC="${TARGET_CHECKPOINT_DIR}.dvc"
-                if [ -f "$CHECKPOINT_DVC" ]; then
-                    CHECKPOINT_HASH=$(grep "md5:" "$CHECKPOINT_DVC" | awk '{print $2}')
-                    CHECKPOINT_DIR="$TARGET_CHECKPOINT_DIR"
-                    log_success "DVC追踪完成 (Hash: ${CHECKPOINT_HASH:0:8})"
-                else
-                    # Fallback if .dvc file wasn't created despite successful dvc add
-                    log_warning "DVC已添加目录但.dvc文件未找到，使用临时哈希"
-                    CHECKPOINT_DVC="${TARGET_CHECKPOINT_DIR}.dvc"
-                    CHECKPOINT_HASH="temp_hash_$(date +%s)"
-                    CHECKPOINT_DIR="$TARGET_CHECKPOINT_DIR"
-                fi
-            else
-                # DVC add failed (likely due to parent directory tracking), use fallback
-                log_warning "DVC跟踪失败，可能因为目录已被父目录管理。继续执行..."
-                CHECKPOINT_DVC="${TARGET_CHECKPOINT_DIR}.dvc"
-                CHECKPOINT_HASH="parent_managed_$(date +%s)"
-                CHECKPOINT_DIR="$TARGET_CHECKPOINT_DIR"
-            fi
-        fi
-    fi
+    log_success "模型权重文件检查完成"
 }
 
 ################################################################################
 # 生成实验记录文件
 ################################################################################
 generate_record() {
-    log_info "步骤8/9: 生成实验记录文件..."
+    log_info "步骤8.5/9: 生成实验记录文件..."
 
     # Extract hyperparameters from TRAIN_ARGS (convert hydra_zen format to JSON)
     PARAMS_JSON=$(python3 -c "
@@ -423,8 +346,8 @@ print(json.dumps(params, indent=2))
     CUDA_VERSION=$(nvcc --version 2>/dev/null | grep "release" | awk '{print $6}' | tr -d ',' || echo "N/A")
     NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo "0")
 
-    # Skip generating record in records directory
-    log_info "跳过在records目录生成记录文件"
+    # Generate record file
+    log_info "生成实验记录文件..."
     cat > "$TEMP_RECORD_FILE" <<EOF
 {
   "experiment": {
@@ -448,10 +371,7 @@ print(json.dumps(params, indent=2))
       "database_init_commit_short": "${DATABASE_INIT_COMMIT:0:8}",
       "cache_commit": "${CACHE_COMMIT:-N/A}",
       "cache_commit_short": "${CACHE_COMMIT:0:8}"
-    },
-    "checkpoint_dvc": "$CHECKPOINT_DVC",
-    "checkpoint_hash": "$CHECKPOINT_HASH",
-    "checkpoint_hash_short": "${CHECKPOINT_HASH:0:8}"
+    }
   },
   "hyperparameters": $PARAMS_JSON,
   "results": {
@@ -469,7 +389,6 @@ print(json.dumps(params, indent=2))
       "git checkout $DATABASE_COMMIT && dvc checkout data/database.dvc && git checkout -",
       "git checkout $BENCHMARKS_COMMIT && dvc checkout data/benchmarks.dvc && git checkout -"
     ],
-    "checkpoint_pull": "dvc pull ${CHECKPOINT_DVC}",
     "full_command": "# 1. 恢复代码版本\\\\ngit checkout $CODE_COMMIT\\\\n\\\\n# 2. 恢复数据集版本\\\\ngit checkout $DATABASE_COMMIT && dvc checkout data/database.dvc && git checkout -\\\\n\\\\n# 3. 恢复验证数据集版本\\\\ngit checkout $BENCHMARKS_COMMIT && dvc checkout data/benchmarks.dvc && git checkout -\\\\n\\\\n# 4. 运行训练\\\\npython 1_pretrain.py $TRAIN_ARGS"
   }
 }
@@ -489,57 +408,48 @@ EOF
 # Find Hydra output directory after training
 ################################################################################
 find_hydra_output_dir() {
-    log_info "步骤8.5/9: 查找Hydra输出目录..."
+    log_info "步骤8.4/9: 查找Hydra输出目录..."
 
     # Look for the most recent output directory containing .hydra folder
     # Search in outputs directory for folders with .hydra subdirectory
     local hydra_dirs=$(find "${PROJECT_ROOT}/outputs" -name ".hydra" -type d -printf "%h\n" 2>/dev/null | sort -r | head -n 1)
-    
+
     if [ -n "$hydra_dirs" ] && [ -d "$hydra_dirs" ]; then
         HYDRA_OUTPUT_DIR="$hydra_dirs"
         log_success "找到Hydra输出目录: $HYDRA_OUTPUT_DIR"
-        
+
+        # Set SWANLAB_URL_FILE to be inside Hydra output directory
+        SWANLAB_URL_FILE="${HYDRA_OUTPUT_DIR}/.swanlab_url"
+
         # Update CHECKPOINT_DIR to point to the Hydra output's 'out' directory
         if [ -d "$HYDRA_OUTPUT_DIR/out" ]; then
             CHECKPOINT_DIR="$HYDRA_OUTPUT_DIR/out"
             log_info "更新CHECKPOINT_DIR到Hydra输出目录: $CHECKPOINT_DIR"
         fi
-        
-        # Copy the record file to Hydra output directory
-        cp "$TEMP_RECORD_FILE" "$HYDRA_OUTPUT_DIR/experiment_record_${EXP_ID}.json"
-        log_info "实验记录已复制到: $HYDRA_OUTPUT_DIR/experiment_record_${EXP_ID}.json"
-        
-        # Track Hydra output directory to DVC
-        track_hydra_output
+
+        # Set TEMP_RECORD_FILE to be inside Hydra output directory
+        TEMP_RECORD_FILE="${HYDRA_OUTPUT_DIR}/experiment_record_${EXP_ID}.json"
     else
         log_warning "未找到Hydra输出目录，使用默认目录"
         HYDRA_OUTPUT_DIR=""
+        # Fallback to project root if no Hydra directory found
+        SWANLAB_URL_FILE="${PROJECT_ROOT}/.swanlab_url"
+        TEMP_RECORD_FILE=""
     fi
 }
 
+
 ################################################################################
-# 追踪Hydra输出目录
+# 显示Hydra输出目录内容
 ################################################################################
-track_hydra_output() {
+show_hydra_output() {
     if [ -n "$HYDRA_OUTPUT_DIR" ] && [ -d "$HYDRA_OUTPUT_DIR" ]; then
-        log_info "步骤8.6/9: 追踪Hydra输出目录到DVC..."
+        log_info "步骤8.6/9: 显示Hydra输出目录内容..."
         log_info "Hydra输出目录内容:"
         ls -la "$HYDRA_OUTPUT_DIR"
-        
-        # DVC追踪Hydra输出目录
-        dvc add "$HYDRA_OUTPUT_DIR"
-        
-        # Get DVC file path for Hydra output
-        HYDRA_OUTPUT_DVC="${HYDRA_OUTPUT_DIR}.dvc"
-        
-        if [ -f "$HYDRA_OUTPUT_DVC" ]; then
-            HYDRA_OUTPUT_HASH=$(grep "md5:" "$HYDRA_OUTPUT_DVC" | awk '{print $2}')
-            log_success "Hydra输出DVC追踪完成 (Hash: ${HYDRA_OUTPUT_HASH:0:8})"
-        else
-            log_warning "Hydra输出DVC文件生成失败 (可能目录为空或无变化): $HYDRA_OUTPUT_DVC"
-        fi
+        log_success "已完成检查Hydra输出目录"
     else
-        log_info "Hydra输出目录不存在，跳过追踪"
+        log_info "Hydra输出目录不存在"
     fi
 }
 
@@ -547,7 +457,7 @@ track_hydra_output() {
 # Git提交所有变更（一次性提交）
 ################################################################################
 commit_all_changes() {
-    log_info "步骤9/9: 提交所有变更到Git..."
+    log_info "步骤8.6/9: 提交所有变更到Git..."
 
     # 显示将要提交的变更
     echo ""
@@ -565,10 +475,6 @@ commit_all_changes() {
     log_info "Commit包含："
     log_info "  - 实验脚本 (如有新增/修改)"
     log_info "  - 记录文件: $TEMP_RECORD_FILE"
-    log_info "  - 检查点DVC元文件: ${CHECKPOINT_DVC}"
-    if [ -n "$HYDRA_OUTPUT_DIR" ] && [ -f "${HYDRA_OUTPUT_DIR}.dvc" ]; then
-        log_info "  - Hydra输出DVC元文件: ${HYDRA_OUTPUT_DIR}.dvc"
-    fi
     log_info "  - 其他代码变更 (如有)"
 }
 
@@ -577,7 +483,7 @@ commit_all_changes() {
 ################################################################################
 cleanup() {
     log_info "清理临时文件..."
-    rm -f "$SWANLAB_URL_FILE"
+    [ -n "$SWANLAB_URL_FILE" ] && rm -f "$SWANLAB_URL_FILE"
     rm -f "$META_FILE"
     log_success "清理完成"
 }
@@ -599,15 +505,10 @@ print_summary() {
     log_info "💾 Checkpoint: $CHECKPOINT_DIR"
     log_info "🏷️  代码版本: ${CODE_COMMIT:0:8}"
     log_info "📊 训练数据集版本: ${DATABASE_COMMIT:0:8}"
-    log_info " 权重哈希: ${CHECKPOINT_HASH:0:8}"
     echo ""
     log_info "复现命令（详见记录文件的reproduction字段）:"
     echo "  1. 恢复代码: git checkout $CODE_COMMIT"
     echo "  2. 恢复数据: 使用记录文件中的data_checkout_steps"
-    echo "  3. 拉取权重: dvc pull ${CHECKPOINT_DVC}"
-    if [ -n "$HYDRA_OUTPUT_DIR" ] && [ -f "${HYDRA_OUTPUT_DIR}.dvc" ]; then
-        echo "  4. 拉取Hydra输出: dvc pull ${HYDRA_OUTPUT_DIR}.dvc"
-    fi
     echo ""
     log_success "========================================="
 }
@@ -621,10 +522,11 @@ main() {
     sync_data
     record_pre_training_meta
     run_training
+    find_hydra_output_dir
     get_swanlab_url
     track_checkpoint
     generate_record
-    find_hydra_output_dir
+    show_hydra_output
     commit_all_changes
     cleanup
     print_summary

@@ -39,7 +39,7 @@ uv.lock
 /experiments/results/*
 !/experiments/results/.gitkeep
 
-# SwanLab日志
+# SwanLab日志（保留目录结构，追踪.dvc文件）
 swanlog/
 wandb/
 /outputs/*
@@ -63,4 +63,3 @@ wandb/
 # secrets.yaml
 **/CLAUDE.md
 /cache
-/outputs
