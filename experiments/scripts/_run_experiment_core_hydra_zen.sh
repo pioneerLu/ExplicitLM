@@ -85,8 +85,10 @@ log_info "========================================="
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 # Will be updated to Hydra's out directory after training
 CHECKPOINT_DIR=""
-# Use the Hydra output directory for the record file
+# Use the Hydra output directory for the temporary record file
 TEMP_RECORD_FILE=""
+# Permanent record file in experiments/records directory
+RECORD_FILE="${PROJECT_ROOT}/experiments/records/${EXP_ID}.json"
 # SWANLAB_URL_FILE will be set after finding Hydra output directory
 SWANLAB_URL_FILE=""
 META_FILE="${PROJECT_ROOT}/.experiment_meta"
@@ -112,11 +114,19 @@ check_prerequisites() {
         exit 1
     fi
 
-    # 检查实验ID是否已存在 (in Hydra output directories)
-    # Note: We're not checking for existing records in the records directory anymore
+    # 创建records目录
+    mkdir -p "${PROJECT_ROOT}/experiments/records"
 
-    # 创建 necessary directories (excluding records)
-    # mkdir -p "${PROJECT_ROOT}/experiments"
+    # 检查实验ID是否已存在
+    if [ -f "$RECORD_FILE" ]; then
+        log_error "实验ID ${EXP_ID} 已存在！"
+        log_info "现有记录文件: $RECORD_FILE"
+        read -p "是否覆盖？(y/N): " confirm
+        if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+            log_info "取消实验"
+            exit 0
+        fi
+    fi
 
     log_success "前置检查通过"
 }
@@ -403,6 +413,14 @@ EOF
 
     log_success "实验记录已生成: $TEMP_RECORD_FILE"
 
+    # 复制记录到experiments/records目录
+    if [ -n "$TEMP_RECORD_FILE" ] && [ -f "$TEMP_RECORD_FILE" ]; then
+        cp "$TEMP_RECORD_FILE" "$RECORD_FILE"
+        log_success "实验记录已复制到: $RECORD_FILE"
+    else
+        log_warning "临时记录文件不存在，无法复制到records目录"
+    fi
+
     # 显示记录文件内容
     echo ""
     log_info "========== 实验记录内容 =========="
@@ -501,7 +519,8 @@ commit_all_changes() {
     log_success "所有变更已提交到Git"
     log_info "Commit包含："
     log_info "  - 实验脚本 (如有新增/修改)"
-    log_info "  - 记录文件: $TEMP_RECORD_FILE"
+    log_info "  - 记录文件 (Hydra): $TEMP_RECORD_FILE"
+    log_info "  - 记录文件 (Records): $RECORD_FILE"
     if [ -n "$HYDRA_OUTPUT_DIR" ]; then
         log_info "  - 实验输出DVC元文件: ${HYDRA_OUTPUT_DIR}.dvc"
     fi
@@ -527,9 +546,10 @@ print_summary() {
     log_success "   实验 ${EXP_ID} 执行完成！"
     log_success "========================================="
     echo ""
-    log_info "📋 记录文件 (默认): $TEMP_RECORD_FILE"
+    log_info "📋 记录文件 (Records): $RECORD_FILE"
+    log_info "📋 记录文件 (Hydra): $TEMP_RECORD_FILE"
     if [ -n "$HYDRA_OUTPUT_DIR" ]; then
-        log_info "📋 记录文件 (Hydra): $HYDRA_OUTPUT_DIR/experiment_record_${EXP_ID}.json"
+        log_info "📋 记录文件 (Hydra副本): $HYDRA_OUTPUT_DIR/experiment_record_${EXP_ID}.json"
     fi
     log_info "🔬 SwanLab URL: $SWANLAB_URL"
     log_info "💾 Checkpoint: $CHECKPOINT_DIR"
