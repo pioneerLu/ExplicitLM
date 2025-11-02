@@ -199,7 +199,69 @@ TRAIN_ARGS="training.epochs=10 model.knowledge_num=1048576 model.dim=512 trainin
 - 保留所有配置的历史记录
 - 使用有意义的实验描述
 
-### 3. 参数验证
+### 3. 运行目录注意事项
+- **工作目录管理**：使用 `hydra.utils.get_original_cwd()` 来获取原始工作目录而不是 `os.getcwd()`
+- **相对路径处理**：配置中的相对路径会被相对于 Hydra 输出目录解析，必要时使用绝对路径
+- **输出路径设置**：使用 `hydra.job.chdir=True` 可以让程序在作业目录中运行
+- **文件路径一致性**：确保在集群环境下不同节点的路径结构一致
+
+#### 示例代码：正确使用get_original_cwd()
+
+```python
+from hydra.utils import get_original_cwd
+from pathlib import Path
+
+def main(cfg):
+    # ❌ 错误方式：使用当前工作目录（可能在输出目录中）
+    # data_path = "data/database/merged_pretrain.jsonl"
+
+    # ✅ 正确方式：使用原始工作目录
+    original_cwd = get_original_cwd()
+    data_path = Path(original_cwd) / "data/database/merged_pretrain.jsonl"
+
+    # 或者更简洁的写法
+    data_path = Path(get_original_cwd()) / "data/database/merged_pretrain.jsonl"
+
+    # 处理数据加载等操作...
+```
+
+#### 示例代码：处理输出目录
+
+```python
+from hydra.utils import get_original_cwd
+from pathlib import Path
+import os
+
+def main(cfg):
+    # 获取原始工作目录
+    original_cwd = get_original_cwd()
+
+    # 获取Hydra的输出目录
+    hydra_output_dir = os.getcwd()
+
+    # 在原始项目目录中读取数据
+    data_file = Path(original_cwd) / "data/train.json"
+
+    # 在Hydra输出目录中保存结果
+    result_file = Path(hydra_output_dir) / "results/model_output.pt"
+
+    print(f"原始工作目录: {original_cwd}")
+    print(f"Hydra输出目录: {hydra_output_dir}")
+    print(f"数据文件路径: {data_file}")
+    print(f"结果文件路径: {result_file}")
+```
+
+#### 命令行使用示例：
+
+```bash
+# 设置工作目录切换（推荐用于集群环境）
+python 1_pretrain.py hydra.job.chdir=True
+
+# 或在配置中设置
+python 1_pretrain.py +hydra.job.chdir=True
+```
+
+### 4. 参数验证
 
 - 在配置类中定义合理的默认值
 - 验证参数的有效性和范围
