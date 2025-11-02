@@ -2,11 +2,11 @@
   "experiment": {
     "id": "exp_001_cluster",
     "description": "基线实验 Hydra-Zen配置版 knowledge_num=1M epochs=10",
-    "timestamp": "2025-11-02T07:01:48Z",
+    "timestamp": "2025-11-02T07:07:55Z",
     "mode": "cluster_pre"
   },
   "versions": {
-    "code_commit": "081dadc003730542227879243b44fba1d016072a",
+    "code_commit": "e4193e48b2c9d55fc81015f38abb93982eb4b7fd",
     "data": {
       "dataset_commit": "28065662dcc2fbccfb47ada4147452adeb00d905",
       "val_dataset_commit": "cd7f9bb784c5dbfabf8193cbca40d66d99e3ba09",
@@ -17,8 +17,8 @@
   },
   "training": {
     "original_args": "training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4 logging.use_swanlab=True",
-    "final_args": "training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4 logging.use_swanlab=True hydra.job.chdir=True hydra.run.dir=/home/pci/ExplicitLM/outputs/2025-11-02/15-01-48_cluster",
-    "output_dir": "/home/pci/ExplicitLM/outputs/2025-11-02/15-01-48_cluster",
-    "command": "accelerate launch 1_pretrain.py training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4 logging.use_swanlab=True hydra.job.chdir=True hydra.run.dir=/home/pci/ExplicitLM/outputs/2025-11-02/15-01-48_cluster"
+    "final_args": "training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4 logging.use_swanlab=True hydra.job.chdir=True hydra.run.dir=/home/pci/ExplicitLM/outputs/2025-11-02/15-07-55_cluster",
+    "output_dir": "/home/pci/ExplicitLM/outputs/2025-11-02/15-07-55_cluster",
+    "command": "accelerate launch 1_pretrain.py training.epochs=1 model.knowledge_num=1024 model.dim=64 model.n_layers=2 training.batch_size=1 training.learning_rate=2e-4 logging.use_swanlab=True hydra.job.chdir=True hydra.run.dir=/home/pci/ExplicitLM/outputs/2025-11-02/15-07-55_cluster"
   }
 }

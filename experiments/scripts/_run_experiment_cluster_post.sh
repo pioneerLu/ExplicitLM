@@ -313,6 +313,15 @@ EOF
 
 log_success "实验记录已生成: $RECORD_FILE"
 
+# 在CHECKPOINT_DIR下也生成一份副本
+CHECKPOINT_RECORD_FILE="${CHECKPOINT_DIR}/experiment_record_${EXP_ID}_${TIMESTAMP_FILENAME}.json"
+if [ -d "$CHECKPOINT_DIR" ]; then
+    cp "$RECORD_FILE" "$CHECKPOINT_RECORD_FILE"
+    log_success "实验记录副本已生成: $CHECKPOINT_RECORD_FILE"
+else
+    log_warning "CHECKPOINT_DIR目录不存在，无法生成副本: $CHECKPOINT_DIR"
+fi
+
 echo ""
 log_info "========== 实验记录内容 =========="
 if command -v python3 >/dev/null 2>&1; then
@@ -418,6 +427,7 @@ if git add -A 2>/dev/null; then
         log_success "所有变更已提交到Git"
         log_info "Commit包含："
         log_info "  - 实验记录文件 (Records): $RECORD_FILE"
+        log_info "  - 实验记录文件 (Checkpoint): $CHECKPOINT_RECORD_FILE"
         log_info "  - Checkpoint目录: $CHECKPOINT_DIR (已包含在outputs目录的DVC管理中)"
         if [ -n "$HYDRA_OUTPUT_DIR" ] && [ -f "${HYDRA_OUTPUT_DIR}.dvc" ]; then
             log_info "  - Hydra输出DVC元文件: ${HYDRA_OUTPUT_DIR}.dvc"
@@ -449,6 +459,7 @@ log_success "   实验 ${EXP_ID} 全部完成！"
 log_success "========================================="
 echo ""
 log_info "📋 记录文件 (Records): $RECORD_FILE"
+log_info "📋 记录文件 (Checkpoint): $CHECKPOINT_RECORD_FILE"
 if [ -n "$HYDRA_OUTPUT_DIR" ]; then
     log_info "📋 记录文件 (Hydra): $HYDRA_OUTPUT_DIR/experiment_record_${EXP_ID}.json"
 fi
