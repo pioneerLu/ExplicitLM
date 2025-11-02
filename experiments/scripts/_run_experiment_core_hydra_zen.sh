@@ -115,7 +115,7 @@ check_prerequisites() {
     # Note: We're not checking for existing records in the records directory anymore
 
     # 创建 necessary directories (excluding records)
-    mkdir -p "${PROJECT_ROOT}/experiments"
+    # mkdir -p "${PROJECT_ROOT}/experiments"
 
     log_success "前置检查通过"
 }
