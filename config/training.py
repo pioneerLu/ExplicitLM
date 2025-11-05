@@ -22,4 +22,13 @@ TrainingConf = builds(
     strategy="deepspeed_stage_2",
     log_interval=10,
     populate_full_signature=False,
+
+    # ---- SFT 特定参数 ----
+      max_new_tokens=50,           # 生成的最大token数
+      eval_interval=500,           # 评估间隔（步数）
+      start_eval=100,              # 开始评估的步数
+      judger_mode='startswith',    # 判断模式
+      show_eval_res=5,             # 评估样例展示数量
+      similarity_loss_coef=0.1,    # 相似度损失系数
+      diversity_loss_coef=0.05,    # 多样性损失系数
 )

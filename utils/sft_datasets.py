@@ -1,10 +1,14 @@
 """
 SFT（监督微调）数据集处理模块
 
-本模块提供用于监督微调的数据集类，支持对话格式的数据加载和处理。
-主要包含两个核心类：
+本模块提供用于监督微调的数据集类和工厂函数，支持对话格式的数据加载和处理。
+
+主要组件：
 1. SFTDataset: 用于训练的数据集，支持对话格式和损失掩码生成
 2. SFTEvalDataset: 用于评估的数据集，只返回原始文本对
+3. create_sft_dataloader: SFT训练数据加载器工厂函数
+4. create_sft_validation_dataloader: SFT验证数据加载器工厂函数
+5. create_sft_eval_dataloader: SFT生成式评估数据加载器工厂函数
 """
 
 import json
@@ -12,7 +16,7 @@ import os
 from typing import Dict, List, Tuple, Any, Union
 
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader, Subset
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 # 设置tokenizers并行化为True以提升性能
@@ -444,3 +448,219 @@ class SFTEvalDataset(Dataset):
         target = conversations[-1]['content']
 
         return prompt, target
+
+
+#########################################################
+# 工厂函数：数据加载器创建
+#########################################################
+
+
+def create_sft_dataloader(
+    data_path: str,
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    batch_size: int,
+    max_length: int = 512,
+    system_message: str = "You are MiniMind, a helpful artificial intelligence assistant.",
+    shuffle: bool = True,
+    num_workers: int = 4,
+    pin_memory: bool = True
+) -> DataLoader:
+    """
+    创建SFT训练数据加载器的工厂函数
+
+    参数:
+        data_path: JSONL格式数据文件路径，每行包含conversations字段
+        tokenizer: Tokenizer实例，支持PreTrainedTokenizer或PreTrainedTokenizerFast
+        batch_size: 批次大小
+        max_length: 最大序列长度，默认512
+        system_message: 系统提示消息，可自定义
+        shuffle: 是否打乱数据，默认True
+        num_workers: 数据加载进程数，默认4
+        pin_memory: 是否使用pin_memory加速GPU传输，默认True
+
+    返回:
+        DataLoader实例
+
+    使用示例:
+        ```python
+        from utils.sft_datasets import create_sft_dataloader
+
+        train_loader = create_sft_dataloader(
+            data_path='dataset/splits/judgement-100k/train.jsonl',
+            tokenizer=tokenizer,
+            batch_size=32,
+            max_length=512,
+            system_message="You are a helpful assistant."
+        )
+
+        for batch_idx, (X, Y, loss_mask) in enumerate(train_loader):
+            # X, Y, loss_mask: [batch_size, max_length-1]
+            # loss_mask中只有assistant回复部分为1
+            ...
+        ```
+    """
+    # 第一阶段：创建SFT数据集实例
+    dataset = SFTDataset(
+        jsonl_path=data_path,
+        tokenizer=tokenizer,
+        max_length=max_length,
+        system_message=system_message
+    )
+
+    # 第二阶段：创建数据加载器
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=True,  # 丢弃最后一个不完整的batch，保证batch_size一致
+        persistent_workers=True if num_workers > 0 else False,  # 保持worker进程，提升性能
+        prefetch_factor=2 if num_workers > 0 else None  # 预取批次数
+    )
+
+    return dataloader
+
+
+def create_sft_validation_dataloader(
+    val_data_path: str,
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    batch_size: int,
+    max_length: int = 512,
+    system_message: str = "You are MiniMind, a helpful artificial intelligence assistant.",
+    num_samples: int = 200,
+    num_workers: int = 4,
+    pin_memory: bool = True
+) -> Union[DataLoader, None]:
+    """
+    创建SFT验证数据加载器的工厂函数
+
+    参数:
+        val_data_path: 验证数据文件路径
+        tokenizer: Tokenizer实例，支持PreTrainedTokenizer或PreTrainedTokenizerFast
+        batch_size: 批次大小
+        max_length: 最大序列长度，默认512
+        system_message: 系统提示消息，可自定义
+        num_samples: 验证样本数量限制（用于加快验证），默认200
+        num_workers: 数据加载进程数，默认4
+        pin_memory: 是否使用pin_memory加速GPU传输，默认True
+
+    返回:
+        DataLoader实例，如果文件不存在返回None
+
+    使用示例:
+        ```python
+        from utils.sft_datasets import create_sft_validation_dataloader
+
+        val_loader = create_sft_validation_dataloader(
+            val_data_path='dataset/splits/judgement-100k/valid.jsonl',
+            tokenizer=tokenizer,
+            batch_size=32,
+            max_length=512,
+            num_samples=100
+        )
+
+        if val_loader is not None:
+            for batch_idx, (X, Y, loss_mask) in enumerate(val_loader):
+                # X, Y, loss_mask: [batch_size, max_length-1]
+                ...
+        ```
+    """
+    # 第一阶段：检查文件是否存在
+    if not os.path.exists(val_data_path):
+        print(f"[警告] 验证数据文件不存在: {val_data_path}")
+        return None
+
+    # 第二阶段：创建验证数据集
+    dataset = SFTDataset(
+        jsonl_path=val_data_path,
+        tokenizer=tokenizer,
+        max_length=max_length,
+        system_message=system_message
+    )
+
+    # 第三阶段：如果数据集大小超过num_samples，创建子集
+    if len(dataset) > num_samples:
+        indices = list(range(num_samples))
+        dataset = Subset(dataset, indices)
+        print(f"[信息] 验证集采样: {num_samples}/{len(dataset)} 样本")
+
+    # 第四阶段：创建数据加载器
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,  # 验证集不需要打乱
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=False  # 验证集保留所有样本
+    )
+
+    return dataloader
+
+
+def create_sft_eval_dataloader(
+    eval_data_path: str,
+    system_message: str = "You are MiniMind, a helpful artificial intelligence assistant.",
+    batch_size: int = 1,
+    max_samples: int = 100
+) -> Union[DataLoader, None]:
+    """
+    创建SFT生成式评估数据加载器的工厂函数
+
+    用于评估模型的实际生成质量，返回原始的问题-答案对。
+    支持多轮对话评估。
+
+    参数:
+        eval_data_path: 评估数据文件路径
+        system_message: 系统提示消息，可自定义
+        batch_size: 批次大小，默认1（生成式评估通常单样本处理）
+        max_samples: 最大评估样本数，默认100
+
+    返回:
+        DataLoader实例，如果文件不存在返回None
+
+    使用示例:
+        ```python
+        from utils.sft_datasets import create_sft_eval_dataloader
+
+        eval_loader = create_sft_eval_dataloader(
+            eval_data_path='dataset/splits/judgement-100k/test.jsonl',
+            system_message="You are a helpful assistant.",
+            batch_size=1,
+            max_samples=50
+        )
+
+        if eval_loader is not None:
+            for prompt, target in eval_loader:
+                # prompt: 包含system和user的完整prompt（支持多轮对话）
+                # target: 期望的assistant回复
+                ...
+        ```
+    """
+    # 第一阶段：检查文件是否存在
+    if not os.path.exists(eval_data_path):
+        print(f"[警告] 评估数据文件不存在: {eval_data_path}")
+        return None
+
+    # 第二阶段：创建评估数据集
+    dataset = SFTEvalDataset(
+        jsonl_path=eval_data_path,
+        system_message=system_message
+    )
+
+    # 第三阶段：如果数据集大小超过max_samples，创建子集
+    if len(dataset) > max_samples:
+        indices = list(range(max_samples))
+        dataset = Subset(dataset, indices)
+        print(f"[信息] 评估集采样: {max_samples}/{len(dataset)} 样本")
+
+    # 第四阶段：创建数据加载器
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,  # 评估集不打乱
+        num_workers=0,  # 生成式评估使用单进程，避免多进程开销
+        pin_memory=False  # 评估通常不需要pin_memory
+    )
+
+    return dataloader
