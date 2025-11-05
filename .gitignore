@@ -39,10 +39,15 @@ uv.lock
 /experiments/results/*
 !/experiments/results/.gitkeep
 
-# SwanLab日志
+# SwanLab日志（保留目录结构，追踪.dvc文件）
 swanlog/
 wandb/
-outputs/
+/outputs/*
+!/outputs/.gitkeep
+!/outputs/*.dvc
+!/outputs/*/
+/outputs/*/*/
+!/outputs/*/*/
 
 # 临时文件
 .swanlab_url
