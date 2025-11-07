@@ -21,10 +21,10 @@ ModelConf = builds(
     knowledge_dim=128,
     knowledge_length=16,
     knowledge_num=1_048_576,
-    cache_path="cache/knowledge_cache.pt",
+    cache_path="data/cache/knowledge_cache.pt",
     recompute_cache=False,
     disable_db=False,
-    database_init_path=None,
+    database_init_path="data/knowledge_base/sentence_trex_data.json",
     freeze_ratio=0.2,
     # MoE
     use_moe=False,

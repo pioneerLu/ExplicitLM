@@ -11,5 +11,5 @@ DatasetConf = builds(
     # ---- sft 相关字段 ----
     pretrained_sft_model_path="out/pretrain_latest.pth", # 预训练 SFT 模型路径
     sft_dataset_path="data/database/merged_sft.jsonl", # SFT 数据集路径
-    sft_val_dataset_path="data/benchmarks/sft_eval_data.jsonl", # SFT 验证数据集路径
+    sft_val_dataset_path="data/benchmarks/eval_data.json", # SFT 验证数据集路径
 )
