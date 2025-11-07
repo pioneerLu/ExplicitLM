@@ -3,6 +3,7 @@
 Hydra-Zen + DeepSpeed 预训练入口
 """
 import os
+import json
 import time
 import gc
 from accelerate import Accelerator, DistributedDataParallelKwargs, DeepSpeedPlugin
@@ -15,15 +16,29 @@ from hydra_zen import launch, zen, instantiate
 from config import store,_main_cfg_func          # 触发配置注册
 from utils.logger import Logger
 from utils.pretrain_datasets import create_pretrain_dataloader, create_validation_dataloader
-from utils.train_loop import train_epoch
+from utils.train_loop_pretrain import train_epoch
 from utils.model_initializer import init_model
 from hydra.utils import get_original_cwd
 from pathlib import Path
+from omegaconf import OmegaConf
 
 try:
     import swanlab
 except ImportError:
     swanlab = None
+
+
+def to_primitive(cfg):
+    """将配置转换为基本数据类型，处理 Path 对象"""
+    if isinstance(cfg, Path):
+        return str(cfg)
+    if isinstance(cfg, (dict, list, tuple)): # 处理普通容器
+        if isinstance(cfg, dict):
+             return {k: to_primitive(v) for k, v in cfg.items()}
+        return type(cfg)(to_primitive(v) for v in cfg)
+    if OmegaConf.is_config(cfg): # 处理 OmegaConf 对象
+        return to_primitive(OmegaConf.to_container(cfg, resolve=True))
+    return cfg
 
 
 def main(cfg):
@@ -36,6 +51,9 @@ def main(cfg):
     l_cfg  = cfg.logging
     tr_cfg = cfg.training      # 所有训练/DeepSpeed 参数都在这儿
     proj_root = Path(get_original_cwd())
+    # 补全路径
+    m_cfg.cache_path = proj_root / m_cfg.cache_path
+    m_cfg.database_init_path = proj_root / m_cfg.database_init_path
     # ------------------------------------------------------------------
     # 2. Accelerator + DeepSpeed
     # ------------------------------------------------------------------
@@ -57,14 +75,17 @@ def main(cfg):
         os.makedirs(l_cfg.save_dir, exist_ok=True)
 
     swanlab_run = None
-    if l_cfg.use_swanlab and accelerator.is_main_process and swanlab is not None:
+    Logger(f"accelerator.is_main_process: {accelerator.is_main_process}", accelerator)
+    Logger(f"swanlab is not None: {swanlab is not None}", accelerator)
+    Logger(f"l_cfg.swanlab_online: {l_cfg.swanlab_online}", accelerator)
+    if l_cfg.swanlab_online == False and accelerator.is_main_process and swanlab is not None:
         mode = "cloud" if l_cfg.swanlab_online else "offline"
         Logger(f"SwanLab 模式：{mode}", accelerator)
         Logger(f"SwanLab 运行中...", accelerator)
         swanlab_run = swanlab.init(
             project=l_cfg.swanlab_project,
             experiment_name=f"ExplicitLM-Pretrain-{tr_cfg.epochs}e-{tr_cfg.batch_size}b",
-            config=instantiate(cfg),   # 把完整配置 flatten 上传
+            config=to_primitive(cfg),  # 使用转换后的配置，处理 Path 对象
             mode=mode
         )
 
@@ -72,9 +93,11 @@ def main(cfg):
     # 4. 模型 / 优化器 / 调度器 / 数据
     # ------------------------------------------------------------------
     # 输出当前目录
-
-    model, tokenizer = init_model(m_cfg)          # 你原来的函数，直接吃 dict
-        # 1. 参数过滤（EMA 逻辑保持原样）
+    try:
+        model, tokenizer = init_model(m_cfg, accelerator)          # 你原来的函数，直接吃 dict
+            # 1. 参数过滤（EMA 逻辑保持原样）
+    except Exception as e:
+        Logger(f"警告：模型初始化失败({e})，使用默认模型", accelerator)
     try:
         model_config = model.module.config if hasattr(model, 'module') else model.config
         use_ema = getattr(model_config, 'use_ema_update', False)
@@ -103,7 +126,7 @@ def main(cfg):
         proj_root / d_cfg.dataset_path, tokenizer,
         tr_cfg.batch_size, m_cfg.max_seq_len,
         shuffle=True,
-        num_workers=4,
+        num_workers=8,
         pin_memory=True,
     )
     val_loader   = create_validation_dataloader(
@@ -125,11 +148,34 @@ def main(cfg):
     )
     Logger(instantiate(cfg), accelerator)
 
+    # ================== [修改] 断点续训加载逻辑 ==================
+    start_epoch = 0
+    resume_step = 0  # 新增：用于记录需要从当前epoch的第几个step开始
+    
+    resume_path = getattr(tr_cfg, 'resume_from_checkpoint', None)
+    if resume_path is not None and os.path.exists(resume_path):
+        Logger(f"正在从断点恢复: {resume_path}", accelerator)
+        accelerator.load_state(resume_path)
+        
+        training_state_path = os.path.join(resume_path, "training_state.json")
+        if os.path.exists(training_state_path):
+            with open(training_state_path, "r") as f:
+                training_state = json.load(f)
+            start_epoch = training_state.get("epoch", 0)
+            resume_step = training_state.get("step", 0) + 1 # 从断点的下一以步开始
+            Logger(f"已恢复至 Epoch {start_epoch}, Step {resume_step}", accelerator)
+        else:
+            Logger("警告：未找到 training_state.json，将从 Epoch 0 开始", accelerator)
+    # ==========================================================
+
     # Logger(instantiate(cfg).model,accelerator)
     # ------------------------------------------------------------------
     # 6. 训练循环
     # ------------------------------------------------------------------
-    for epoch in range(tr_cfg.epochs):
+    # 计算当前 epoch 需要跳过的步数：
+    for epoch in range(start_epoch, tr_cfg.epochs):
+        # 只有在起始 epoch 才需要跳过 resume_step，后续 epoch 都从 0 开始
+        current_resume_step = resume_step if epoch == start_epoch else 0
         train_epoch(
             epoch=epoch,
             accelerator=accelerator,
@@ -142,6 +188,7 @@ def main(cfg):
             swanlab_run=swanlab_run,
             tokenizer=tokenizer,
             val_loader=val_loader,
+            resume_step=current_resume_step  # [新增] 传递 resume_step
         )
         gc.collect()
         torch.cuda.empty_cache()
