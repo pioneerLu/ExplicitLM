@@ -65,26 +65,26 @@ class WeightInitializer:
     """权重初始化器"""
 
     @staticmethod
-    def initialize_model_weights(model: nn.Module, model_type: str) -> None:
-        Logger("执行模型权重初始化...")
-        RMSNorm = WeightInitializer._import_rmsnorm(model_type)
-        WeightInitializer._init_embeddings(model)
-        WeightInitializer._init_layers(model, RMSNorm)
-        WeightInitializer._init_knowledge_components(model)
-        Logger("模型权重初始化完成")
+    def initialize_model_weights(model: nn.Module, model_type: str, accelerator=None) -> None:
+        Logger("执行模型权重初始化...", accelerator)
+        RMSNorm = WeightInitializer._import_rmsnorm(model_type, accelerator)
+        WeightInitializer._init_embeddings(model, accelerator)
+        WeightInitializer._init_layers(model, RMSNorm, accelerator)
+        WeightInitializer._init_knowledge_components(model, accelerator)
+        Logger("模型权重初始化完成", accelerator)
 
     @staticmethod
-    def _import_rmsnorm(model_type: str):
+    def _import_rmsnorm(model_type: str, accelerator=None):
         try:
             config = ModelTypeConfig.get_config(model_type)
             module = __import__(config["module_path"], fromlist=["RMSNorm"])
             return module.RMSNorm
         except (ImportError, AttributeError):
-            Logger("警告: 无法导入RMSNorm，跳过RMSNorm初始化")
+            Logger("警告: 无法导入RMSNorm，跳过RMSNorm初始化", accelerator)
             return None
 
     @staticmethod
-    def _init_embeddings(model: nn.Module) -> None:
+    def _init_embeddings(model: nn.Module, accelerator=None) -> None:
         if hasattr(model, "tok_embeddings"):
             nn.init.normal_(model.tok_embeddings.weight, mean=0.0, std=0.02)
         if hasattr(model, "output"):
@@ -97,7 +97,7 @@ class WeightInitializer:
                 nn.init.normal_(model.output.weight, mean=0.0, std=0.02)
 
     @staticmethod
-    def _init_layers(model: nn.Module, RMSNorm) -> None:
+    def _init_layers(model: nn.Module, RMSNorm, accelerator=None) -> None:
         for name, module in model.named_modules():
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight)
@@ -110,21 +110,21 @@ class WeightInitializer:
                     nn.init.ones_(module.weight)
 
     @staticmethod
-    def _init_knowledge_components(model: nn.Module) -> None:
+    def _init_knowledge_components(model: nn.Module, accelerator=None) -> None:
         if hasattr(model, "knowledge_dataset") and hasattr(model.knowledge_dataset, "keys"):
             nn.init.normal_(model.knowledge_dataset.keys, mean=0.0, std=0.02)
 
 
 class EmbeddingLoader:
     @staticmethod
-    def load_pretrained_embeddings(model: nn.Module, embedding_path: str) -> None:
-        Logger(f"加载预训练嵌入权重: {embedding_path}")
+    def load_pretrained_embeddings(model: nn.Module, embedding_path: str, accelerator=None) -> None:
+        Logger(f"加载预训练嵌入权重: {embedding_path}", accelerator)
         pretrained_embeddings = torch.load(embedding_path)
         if hasattr(model, "tok_embeddings"):
             model.tok_embeddings.weight.data.copy_(pretrained_embeddings)
         if hasattr(model, "output"):
             model.output.weight.data.copy_(pretrained_embeddings)
-        Logger("预训练嵌入权重加载完成")
+        Logger("预训练嵌入权重加载完成", accelerator)
 
 
 class DatabaseProcessor:
@@ -497,12 +497,13 @@ class MemoryBankProcessor:
 # ------------------------------------------------------------------
 # 统一入口函数：只改参数读取方式，其余不动
 # ------------------------------------------------------------------
-def init_model(args: dict):
+def init_model(args: dict, accelerator=None):
     """
     统一的模型初始化接口（直接使用 dict 配置）
 
     Args:
         args: 配置字典，含全部超参
+        accelerator: Accelerator 对象，用于分布式训练时的日志输出
 
     Returns:
         (model, tokenizer) tuple
@@ -513,17 +514,34 @@ def init_model(args: dict):
     cache_path = args.get("cache_path", "cache/knowledge_cache.pt")
     recompute_cache = args.get("recompute_cache", False)
 
-    Logger(f"使用模型类型: {model_type}")
+    Logger("=" * 60, accelerator)
+    Logger("🚀 开始模型初始化流程", accelerator)
+    Logger("=" * 60, accelerator)
+    Logger(f"📋 模型配置信息:", accelerator)
+    Logger(f"  - 模型类型: {model_type}", accelerator)
+    Logger(f"  - 预训练嵌入路径: {pretrained_embedding_path if pretrained_embedding_path else '未指定'}", accelerator)
+    Logger(f"  - 数据库初始化路径: {database_init_path if database_init_path else '未指定'}", accelerator)
+    Logger(f"  - 缓存路径: {cache_path}", accelerator)
+    Logger(f"  - 重新计算缓存: {recompute_cache}", accelerator)
+    
     type_config = ModelTypeConfig.get_config(model_type)
+    Logger(f"  - 数据库属性: {type_config.get('database_attribute', '无')}", accelerator)
+    Logger(f"  - 需要权重初始化: {type_config.get('requires_weight_init', False)}", accelerator)
+    Logger(f"  - 内存优化: {type_config.get('memory_optimization', False)}", accelerator)
 
     # 动态导入模型类
+    Logger(f"📦 导入模型模块: {type_config['module_path']}", accelerator)
     module = __import__(type_config["module_path"], fromlist=[type_config["class_name"]])
     ExplicitLM = getattr(module, type_config["class_name"])
+    
     # 输出当前目录
-    Logger(f"当前目录: {os.getcwd()}")
+    Logger(f"📍 当前工作目录: {os.getcwd()}", accelerator)
+    
     # 加载 tokenizer
+    Logger("🔤 加载tokenizer...", accelerator)
     tokenizer_dir = Path(get_original_cwd()) / "models" / "ExplicitLM_tokenizer"
     tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir))
+    Logger(f"✅ Tokenizer加载完成，词汇表大小: {len(tokenizer)}", accelerator)
 
     # 构造 LMConfig 对象（仅用于满足旧构造函数签名）
     # lm_config = LMConfig(
@@ -547,37 +565,61 @@ def init_model(args: dict):
     # )
 
     # 创建模型
+    Logger("🏗️  创建模型实例...", accelerator)
     model = ExplicitLM(args)
-
+    Logger("✅ 模型实例创建完成", accelerator)
 
     # 权重初始化
     if type_config["requires_weight_init"]:
-        WeightInitializer.initialize_model_weights(model, model_type)
+        Logger("⚖️  执行模型权重初始化...", accelerator)
+        WeightInitializer.initialize_model_weights(model, model_type, accelerator)
+        Logger("✅ 模型权重初始化完成", accelerator)
 
     if type_config.get("memory_optimization"):
-        Logger("✅ 显存优化策略：候选项减少(32→16) + DeepSpeed参数offload")
+        Logger("✅ 显存优化策略：候选项减少(32→16) + DeepSpeed参数offload", accelerator)
 
     # 预训练嵌入
     if pretrained_embedding_path:
-        EmbeddingLoader.load_pretrained_embeddings(model, pretrained_embedding_path)
+        Logger("🎯 加载预训练嵌入权重...", accelerator)
+        EmbeddingLoader.load_pretrained_embeddings(model, pretrained_embedding_path, accelerator)
+        Logger("✅ 预训练嵌入权重加载完成", accelerator)
 
     # 数据库 / 记忆库初始化
     if database_init_path and type_config["database_attribute"]:
+        Logger("🗄️  开始数据库/记忆库初始化...", accelerator)
+        Logger(f"  - 数据库路径: {database_init_path}", accelerator)
+        Logger(f"  - 缓存路径: {cache_path}", accelerator)
+        Logger(f"  - 知识库大小: {args.knowledge_num}", accelerator)
+        Logger(f"  - 知识条目长度: {args.knowledge_length}", accelerator)
+        Logger(f"  - 目标属性: {type_config['database_attribute']}", accelerator)
+        
         _initialize_database(
             model=model,
             tokenizer=tokenizer,
             database_path=database_init_path,
             cache_path=cache_path,
-            knowledge_num=lm_config.knowledge_num,
-            knowledge_length=lm_config.knowledge_length,
+            knowledge_num=args.knowledge_num,
+            knowledge_length=args.knowledge_length,
             recompute=recompute_cache,
             model_type=model_type,
             database_attribute=type_config["database_attribute"],
+            accelerator=accelerator,
         )
+        Logger("✅ 数据库/记忆库初始化完成", accelerator)
+    else:
+        if not database_init_path:
+            Logger("⚠️  未指定数据库初始化路径，跳过数据库初始化", accelerator)
+        if not type_config["database_attribute"]:
+            Logger("⚠️  当前模型类型不支持数据库初始化，跳过", accelerator)
 
     # 参数统计
+    Logger("📊 计算模型参数统计...", accelerator)
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
-    Logger(f"LLM总参数量：{total_params:.3f} 百万")
+    Logger(f"📈 LLM总参数量：{total_params:.3f} 百万", accelerator)
+    
+    Logger("=" * 60, accelerator)
+    Logger("🎉 模型初始化流程完成", accelerator)
+    Logger("=" * 60, accelerator)
 
     return model, tokenizer
 
@@ -593,19 +635,64 @@ def _initialize_database(
     recompute: bool,
     model_type: str,
     database_attribute: str,
+    accelerator=None,
 ) -> None:
+    Logger("🔍 开始数据库/记忆库初始化详细流程", accelerator)
+    Logger(f"📊 初始化参数:", accelerator)
+    Logger(f"  - 模型类型: {model_type}", accelerator)
+    Logger(f"  - 数据库路径: {database_path}", accelerator)
+    Logger(f"  - 缓存路径: {cache_path}", accelerator)
+    Logger(f"  - 知识库大小: {knowledge_num}", accelerator)
+    Logger(f"  - 知识条目长度: {knowledge_length}", accelerator)
+    Logger(f"  - 重新计算缓存: {recompute}", accelerator)
+    Logger(f"  - 目标属性路径: {database_attribute}", accelerator)
+    
+    # 检查数据库文件是否存在
+    if not os.path.exists(database_path):
+        Logger(f"❌ 错误: 数据库文件不存在: {database_path}", accelerator)
+        raise FileNotFoundError(f"数据库文件不存在: {database_path}")
+    
+    # 获取数据库文件信息
+    try:
+        file_size = os.path.getsize(database_path)
+        file_size_mb = file_size / (1024 * 1024)
+        Logger(f"📁 数据库文件信息:", accelerator)
+        Logger(f"  - 文件大小: {file_size_mb:.2f} MB ({file_size:,} bytes)", accelerator)
+        Logger(f"  - 文件路径: {os.path.abspath(database_path)}", accelerator)
+    except Exception as e:
+        Logger(f"⚠️  无法获取数据库文件信息: {e}", accelerator)
+    
+    # 确保缓存目录存在
+    cache_dir = os.path.dirname(cache_path)
+    if cache_dir and not os.path.exists(cache_dir):
+        Logger(f"📁 创建缓存目录: {cache_dir}", accelerator)
+        os.makedirs(cache_dir, exist_ok=True)
+    
+    # 根据模型类型选择处理器
     if model_type == "model_memory":
+        Logger("🧠 使用MemoryBankProcessor处理记忆库数据", accelerator)
         processor = MemoryBankProcessor(tokenizer)
         if not cache_path or cache_path == "cache/knowledge_cache.pt":
             cache_path = f"cache/memory_bank_init_{knowledge_num}_{knowledge_length}.pt"
+            Logger(f"🔄 自动调整缓存路径为: {cache_path}", accelerator)
+        
+        Logger("🚀 开始处理记忆库数据...", accelerator)
+        start_time = time.time()
         processed_tensor = processor.process_memory_bank(
             database_path=database_path,
             cache_path=cache_path,
             knowledge_num=knowledge_num,
             knowledge_length=knowledge_length,
         )
+        processing_time = time.time() - start_time
+        Logger(f"⏱️  记忆库数据处理完成，耗时: {processing_time:.2f} 秒", accelerator)
+        
     else:
+        Logger("💾 使用DatabaseProcessor处理知识库数据", accelerator)
         processor = DatabaseProcessor(tokenizer)
+        
+        Logger("🚀 开始处理知识库数据...", accelerator)
+        start_time = time.time()
         processed_tensor = processor.load_or_process_database(
             database_path=database_path,
             cache_path=cache_path,
@@ -613,22 +700,88 @@ def _initialize_database(
             knowledge_length=knowledge_length,
             recompute=recompute,
         )
-    _set_database_attribute(model, database_attribute, processed_tensor)
-    Logger("数据库嵌入和句子已存储到模型")
+        processing_time = time.time() - start_time
+        Logger(f"⏱️  知识库数据处理完成，耗时: {processing_time:.2f} 秒", accelerator)
+    
+    # 验证处理后的张量
+    Logger("🔍 验证处理后的数据张量...", accelerator)
+    if processed_tensor is not None:
+        Logger(f"✅ 张量验证通过:", accelerator)
+        Logger(f"  - 张量形状: {processed_tensor.shape}", accelerator)
+        Logger(f"  - 张量类型: {processed_tensor.dtype}", accelerator)
+        Logger(f"  - 张量设备: {processed_tensor.device}", accelerator)
+        Logger(f"  - 内存占用: {processed_tensor.numel() * processed_tensor.element_size() / (1024*1024):.2f} MB", accelerator)
+        
+        # 检查数据范围
+        if processed_tensor.numel() > 0:
+            min_val = processed_tensor.min().item()
+            max_val = processed_tensor.max().item()
+            Logger(f"  - 数据范围: [{min_val}, {max_val}]", accelerator)
+            
+            # 检查是否有异常值
+            if min_val < 0:
+                Logger(f"⚠️  警告: 发现负值token ID，最小值: {min_val}", accelerator)
+            if hasattr(tokenizer, 'vocab_size') and max_val >= tokenizer.vocab_size:
+                Logger(f"⚠️  警告: 发现超出词汇表范围的token ID，最大值: {max_val}, 词汇表大小: {tokenizer.vocab_size}", accelerator)
+    else:
+        Logger("❌ 错误: 处理后的张量为None", accelerator)
+        raise ValueError("数据处理失败，返回的张量为None")
+    
+    # 设置模型属性
+    Logger("🔧 设置模型数据库属性...", accelerator)
+    start_time = time.time()
+    _set_database_attribute(model, database_attribute, processed_tensor, accelerator)
+    attribute_setting_time = time.time() - start_time
+    Logger(f"⏱️  模型属性设置完成，耗时: {attribute_setting_time:.4f} 秒", accelerator)
+    
+    # 验证模型属性是否正确设置
+    Logger("🔍 验证模型属性设置...", accelerator)
+    attributes = database_attribute.split(".")
+    target = model
+    for attr in attributes[:-1]:
+        if hasattr(target, attr):
+            target = getattr(target, attr)
+        else:
+            Logger(f"❌ 错误: 无法找到中间属性 {attr}", accelerator)
+            return
+    
+    final_attr = attributes[-1]
+    if hasattr(target, final_attr):
+        stored_tensor = getattr(target, final_attr)
+        if torch.equal(stored_tensor, processed_tensor):
+            Logger(f"✅ 模型属性验证成功: model.{database_attribute}", accelerator)
+            Logger(f"  - 存储张量形状: {stored_tensor.shape}", accelerator)
+            Logger(f"  - 存储张量类型: {stored_tensor.dtype}", accelerator)
+            Logger(f"  - 存储张量设备: {stored_tensor.device}", accelerator)
+        else:
+            Logger(f"❌ 错误: 模型属性验证失败，存储的张量与原始张量不匹配", accelerator)
+    else:
+        Logger(f"❌ 错误: 无法找到目标属性 {final_attr}", accelerator)
+    
+    # 总体统计
+    total_time = time.time() - start_time
+    Logger("📊 数据库/记忆库初始化统计:", accelerator)
+    Logger(f"  - 总处理时间: {total_time:.2f} 秒", accelerator)
+    Logger(f"  - 数据条目数: {processed_tensor.shape[0]}", accelerator)
+    Logger(f"  - 每条目长度: {processed_tensor.shape[1]}", accelerator)
+    Logger(f"  - 总token数: {processed_tensor.numel()}", accelerator)
+    Logger(f"  - 处理速度: {processed_tensor.numel() / total_time:.0f} tokens/秒", accelerator)
+    
+    Logger("✅ 数据库嵌入和句子已成功存储到模型", accelerator)
 
 
-def _set_database_attribute(model: nn.Module, attribute_path: str, data: torch.Tensor) -> None:
+def _set_database_attribute(model: nn.Module, attribute_path: str, data: torch.Tensor, accelerator=None) -> None:
     attributes = attribute_path.split(".")
     target = model
     for attr in attributes[:-1]:
         if not hasattr(target, attr):
-            Logger(f"警告: 找不到属性 {attr}，无法初始化数据库")
+            Logger(f"警告: 找不到属性 {attr}，无法初始化数据库", accelerator)
             return
         target = getattr(target, attr)
     final_attr = attributes[-1]
     if hasattr(target, final_attr):
         getattr(target, final_attr).data.copy_(data)
-        Logger(f"成功初始化 model.{attribute_path} 使用处理后的数据")
+        Logger(f"成功初始化 model.{attribute_path} 使用处理后的数据", accelerator)
     else:
-        Logger(f"警告: 找不到 model.{attribute_path} 进行初始化")
+        Logger(f"警告: 找不到 model.{attribute_path} 进行初始化", accelerator)
         globals()["processed_database"] = data

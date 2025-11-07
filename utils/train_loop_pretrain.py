@@ -7,6 +7,8 @@
 - 集成SwanLab实验追踪
 """
 
+import os
+import json
 import time
 from typing import Any, Optional
 
@@ -35,7 +37,8 @@ def train_epoch(
     overall_start_time: float,
     swanlab_run: Optional[Any],
     tokenizer: Any,
-    val_loader: Optional[DataLoader] = None
+    val_loader: Optional[DataLoader] = None,
+    resume_step: int = 0  # [新增] 接收需要跳过的步数
 ) -> None:
     """
     单个epoch的训练循环
@@ -61,27 +64,41 @@ def train_epoch(
     """
     loss_fct = nn.CrossEntropyLoss(reduction='none')
     epoch_start_time = time.time()
+    
+    # 计算总步数信息
     total_steps_in_epoch = len(train_loader)
     total_training_steps = args.training.epochs * total_steps_in_epoch
+    
     moe_path = '_moe' if args.model.use_moe else ''
-    best_loss = float('inf')
+    best_loss = float('inf') # 注意：这里best_loss是epoch内局部最优，如果需要全局最优需要在外部维护并传入
+
+    # [新增] 断点续训：跳过已训练的 batches
+    if resume_step > 0:
+        train_loader = accelerator.skip_first_batches(train_loader, num_batches=resume_step)
+        if accelerator.is_main_process:
+            Logger(f"Epoch {epoch}: 已跳过前 {resume_step} 个 batches 以实现续训", accelerator)
 
     # 记录初始状态
-    last_log_time = epoch_start_time
+    last_log_time = time.time()
 
-    for step, (X, Y, loss_mask) in enumerate(train_loader):
+    # 使用 enumerate 获取当前循环的索引 step_idx
+    for step_idx, (X, Y, loss_mask) in enumerate(train_loader):
+        # [新增] 计算当前 epoch 内的真实 step 和全局 step
+        current_step = step_idx + resume_step
+        global_step = epoch * total_steps_in_epoch + current_step + 1
+
         # 更新学习率
         if scheduler is not None:
             scheduler.step()
 
         # 前向传播（DeepSpeed自动处理bf16混合精度）
-        # 第一个epoch的embedding冻结处理
-        if step == 0 and args.training.embeddings_epoch == epoch:
+        # 第一个epoch的embedding冻结处理 (使用 current_step 判断)
+        if current_step == 0 and args.training.embeddings_epoch == epoch:
             unwrapped_model = accelerator.unwrap_model(model)
             unwrapped_model.freeze_embedding = True
-            Logger(f"设置freeze_embedding=True (epoch {epoch}, step {step})", accelerator)
+            Logger(f"设置freeze_embedding=True (epoch {epoch}, step {current_step})", accelerator)
 
-        res = model(X, step=step)
+        res = model(X, step=current_step) # 传入正确的 step
 
         # 计算主要损失（交叉熵损失）
         ce_loss = loss_fct(
@@ -132,7 +149,7 @@ def train_epoch(
                 ema_update_stats = unwrapped_model.apply_ema_update(res.ema_stats)
 
                 # 记录EMA更新统计信息
-                if (step + 1) % args.logging.log_interval == 0 and accelerator.is_main_process:
+                if (current_step + 1) % args.logging.log_interval == 0 and accelerator.is_main_process:
                     if ema_update_stats.get('ema_update_applied', False):
                         total_memories = args.model.knowledge_num
                         Logger(
@@ -143,28 +160,55 @@ def train_epoch(
                             accelerator
                         )
 
-        # 验证评估和日志记录（仅主进程）
-        if (step + 1) % args.logging.log_interval == 0 and accelerator.is_main_process:
-            current_time = time.time()
+        # ============================================================
+        # [新增] 机制1：每 500 个 Global Step 保存一次完整 Checkpoint (用于续训)
+        # ============================================================
+        SAVE_INTERVAL = 500  # 可以改为从 args 传入: args.training.save_interval
+        if global_step % SAVE_INTERVAL == 0:
+            save_dir = os.path.join(args.logging.save_dir, f"checkpoint_step_{global_step}")
+            if accelerator.is_main_process:
+                os.makedirs(save_dir, exist_ok=True)
+            
+            # 等待所有进程，确保安全保存
+            accelerator.wait_for_everyone()
+            # 保存完整状态 (模型、优化器、LR调度器等)
+            accelerator.save_state(save_dir)
+            
+            # 仅主进程写入元数据，记录精确的恢复位置
+            if accelerator.is_main_process:
+                with open(os.path.join(save_dir, "training_state.json"), "w") as f:
+                    # 记录当前完成的 step，恢复时应从 current_step + 1 开始
+                    json.dump({
+                        "epoch": epoch, 
+                        "step": current_step, 
+                        "global_step": global_step
+                    }, f)
+                Logger(f"🔥 [Checkpoint] Step {global_step} 完整状态已保存至 {save_dir}", accelerator)
 
-            # 计算当前学习率
+        # ============================================================
+        # 验证评估和日志记录（仅主进程）
+        # ============================================================
+        if (current_step + 1) % args.logging.log_interval == 0 and accelerator.is_main_process:
+            current_time = time.time()
             current_lr = optimizer.param_groups[0]['lr']
 
-            # 计算时间估算
-            epoch_elapsed_time = current_time - epoch_start_time
-            epoch_steps_done = step + 1
-            epoch_avg_step_time = epoch_elapsed_time / epoch_steps_done
-            epoch_remaining_time = epoch_avg_step_time * (total_steps_in_epoch - epoch_steps_done)
+            # 时间估算
+            epoch_elapsed = current_time - epoch_start_time
+            # 当前epoch已完成的step数 (包含跳过的)
+            epoch_steps_done = current_step + 1
+            # 注意：如果跳过了很多步，初期估算可能不准，但会迅速收敛
+            epoch_avg_time = epoch_elapsed / (epoch_steps_done - resume_step) if (epoch_steps_done - resume_step) > 0 else 0
+            epoch_remaining = epoch_avg_time * (total_steps_in_epoch - epoch_steps_done)
 
-            total_elapsed_time = current_time - overall_start_time
-            total_steps_done = epoch * total_steps_in_epoch + epoch_steps_done
-            total_avg_step_time = total_elapsed_time / total_steps_done if total_steps_done > 0 else 0
-            total_remaining_time = total_avg_step_time * (total_training_steps - total_steps_done) if total_steps_done > 0 else 0
+            total_elapsed = current_time - overall_start_time
+            total_steps_done = global_step
+            total_avg_time = total_elapsed / total_steps_done if total_steps_done > 0 else 0
+            total_remaining = total_avg_time * (total_training_steps - total_steps_done)
 
             # 计算训练速度
-            interval_elapsed_time = current_time - last_log_time
-            tokens_processed_interval = args.logging.log_interval * args.training.batch_size * args.model.max_seq_len
-            tokens_per_sec = tokens_processed_interval / interval_elapsed_time if interval_elapsed_time > 0 else 0
+            interval_time = current_time - last_log_time
+            tokens_processed = args.logging.log_interval * args.training.batch_size * args.model.max_seq_len
+            tokens_per_sec = tokens_processed / interval_time if interval_time > 0 else 0
             last_log_time = current_time
 
             # 执行验证评估
@@ -201,16 +245,16 @@ def train_epoch(
             # 构建日志字典
             log_dict = {
                 "epoch": epoch + 1,
-                "step": step + 1,
-                "total_steps_in_epoch": total_steps_in_epoch,
+                "step": current_step + 1,
+                "global_step": global_step,
                 "train/loss_ce": ce_loss.item(),
                 "train/loss_similarity": similarity_loss.item() if isinstance(similarity_loss, torch.Tensor) else similarity_loss,
                 "train/loss_diversity": diversity_loss.item() if isinstance(diversity_loss, torch.Tensor) else diversity_loss,
                 "train/loss_total": total_loss.item(),
                 "lr": current_lr,
                 "tokens_per_sec": tokens_per_sec,
-                "epoch_time_left_seconds": epoch_remaining_time,
-                "total_time_left_seconds": total_remaining_time,
+                "epoch_time_left": epoch_remaining,
+                "total_time_left": total_remaining,
                 "train/avg_selected_similarity": avg_selected_similarity,
             }
 
@@ -223,17 +267,11 @@ def train_epoch(
 
             # 控制台输出
             Logger(
-                f"Epoch {epoch+1}/{args.training.epochs}, Step {step+1}/{total_steps_in_epoch}, "
-                f"CE: {log_dict['train/loss_ce']:.4f}, "
-                f"Sim: {log_dict['train/loss_similarity']:.4f}, "
-                f"Div: {log_dict['train/loss_diversity']:.4f}, "
-                f"Total: {log_dict['train/loss_total']:.4f}, "
-                f"Val: {log_dict.get('val/loss', 'N/A')}, "
-                f"LR: {log_dict['lr']:.6f}, "
-                f"Speed: {log_dict['tokens_per_sec']:.2f} tokens/sec | "
-                f"Sel.Sim: {avg_selected_similarity:.4f} | "
-                f"Epoch剩余: {format_time(epoch_remaining_time)} | "
-                f"总剩余: {format_time(total_remaining_time)}",
+                f"Epoch {epoch+1}/{args.training.epochs} | Step {current_step+1}/{total_steps_in_epoch} (Global {global_step}) | "
+                f"Loss: {total_loss.item():.4f} | Val: {log_dict.get('val/loss', 'N/A')} | "
+                f"CE: {ce_loss.item():.4f} | Sim: {similarity_loss.item():.4f} | Div: {diversity_loss.item():.4f} | "
+                f"Speed: {tokens_per_sec:.0f} tok/s | "
+                f"ETA Epoch: {format_time(epoch_remaining)}",
                 accelerator
             )
 
@@ -241,16 +279,20 @@ def train_epoch(
             if args.logging.use_swanlab and swanlab_run:
                 swanlab_run.log(log_dict)
 
-        # 模型保存（仅主进程）
+        # ============================================================
+        # [原有] 机制2：保存当前 Epoch 内最佳权重 (用于推理)
+        # ============================================================
+        # 注意：这里仅在主进程执行，且只保存权重(state_dict)，不包含优化器状态
         if accelerator.is_main_process:
-            loss_total = loss.item() * args.training.accumulation_steps
-            if best_loss > loss_total:
-                best_loss = loss_total
-                ckp = f'{args.logging.save_dir}/pretrain_{args.model.dim}{moe_path}.pth'
+            current_loss_total = loss.item() * args.training.accumulation_steps
+            if best_loss > current_loss_total:
+                best_loss = current_loss_total
+                # 构造保存路径，建议加上 epoch 以免不同 epoch 的最佳模型互相覆盖(可选)
+                # 原路径: f'{args.logging.save_dir}/pretrain_{args.model.dim}{moe_path}.pth'
+                # 建议改进路径:
+                ckp_best = f'{args.logging.save_dir}/pretrain_{args.model.dim}_epoch{epoch}{moe_path}_best.pth'
 
-                # 获取解包后的模型
                 unwrapped_model = accelerator.unwrap_model(model)
-
-                # 保存模型参数
-                accelerator.save(unwrapped_model.state_dict(), ckp)
-                Logger(f"模型已保存至 {ckp}", accelerator)
+                accelerator.save(unwrapped_model.state_dict(), ckp_best)
+                # Logger(f"🌟 新最佳模型 (Loss {best_loss:.4f}) 已保存至 {ckp_best}", accelerator) 
+                # 注：如果每个step都打印可能会太多，可以考虑只在 log_interval 时打印
