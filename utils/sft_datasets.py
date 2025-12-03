@@ -75,9 +75,14 @@ class SFTDataset(Dataset):
         self.bos_id = self._encode_special_token('<|im_start|>assistant')
         self.eos_id = self._encode_special_token('<|im_end|>')
 
-        # 验证tokenizer配置
-        assert tokenizer.bos_token is not None, "tokenizer必须定义bos_token"
-        assert tokenizer.eos_token is not None, "tokenizer必须定义eos_token"
+        # 验证tokenizer配置（Qwen tokenizer可能没有bos_token，使用pad_token作为fallback）
+        if tokenizer.bos_token is None:
+            if tokenizer.pad_token is not None:
+                tokenizer.bos_token = tokenizer.pad_token
+            else:
+                raise ValueError("tokenizer必须定义bos_token或pad_token")
+        if tokenizer.eos_token is None:
+            raise ValueError("tokenizer必须定义eos_token")
 
     def _encode_special_token(self, token: str) -> List[int]:
         """
@@ -102,13 +107,18 @@ class SFTDataset(Dataset):
         """
         从JSONL文件加载数据并进行验证
 
+        支持两种格式：
+        1. 对话格式：包含 'conversations' 字段
+        2. TREX格式：包含 'text' 字段（自动转换为对话格式）
+
         参数:
             path: 数据文件路径
 
         返回:
-            验证通过的样本列表
+            验证通过的样本列表（统一为对话格式）
         """
         samples = []
+        skipped_count = 0
         with open(path, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f, 1):
                 try:
@@ -117,6 +127,25 @@ class SFTDataset(Dataset):
                     # 验证数据格式
                     if not isinstance(data, dict):
                         raise ValueError("样本必须是字典类型")
+
+                    # 检查是否为TREX格式（包含text字段但不包含conversations）
+                    if 'text' in data and 'conversations' not in data:
+                        # TREX格式：将text字段转换为对话格式
+                        text = data['text']
+                        # 简单处理：将text作为assistant的回复，创建一个简单的对话
+                        converted_data = {
+                            'conversations': [
+                                {
+                                    'role': 'user',
+                                    'content': '请根据以下内容回答问题。'
+                                },
+                                {
+                                    'role': 'assistant',
+                                    'content': text.replace('<|im_start|>', '').replace('<|im_end|>', '').strip()
+                                }
+                            ]
+                        }
+                        data = converted_data
 
                     if 'conversations' not in data:
                         raise ValueError("缺少conversations字段")
@@ -142,10 +171,14 @@ class SFTDataset(Dataset):
                     samples.append(data)
 
                 except Exception as e:
-                    print(f"[警告] 跳过第{line_num}行: {e}")
+                    skipped_count += 1
+                    if skipped_count <= 20:  # 只显示前20个警告
+                        print(f"[警告] 跳过第{line_num}行: {e}")
                     continue
 
         print(f"成功加载 {len(samples)} 个训练样本")
+        if skipped_count > 20:
+            print(f"[警告] 还有 {skipped_count - 20} 个样本被跳过")
         return samples
 
     def _create_chat_prompt(self, conversations: List[Dict[str, str]]) -> str:
@@ -377,23 +410,59 @@ class SFTEvalDataset(Dataset):
         """
         从JSONL文件加载评估数据
 
+        支持两种格式：
+        1. 对话格式：包含 'conversations' 字段
+        2. TREX格式：包含 'text' 字段（自动转换为对话格式）
+
         参数:
             path: 数据文件路径
 
         返回:
-            样本列表
+            样本列表（统一为对话格式）
         """
         samples = []
+        skipped_count = 0
         with open(path, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f, 1):
                 try:
                     data = json.loads(line.strip())
-                    samples.append(data)
+                    
+                    # 检查是否为TREX格式（包含text字段但不包含conversations）
+                    if 'text' in data and 'conversations' not in data:
+                        # TREX格式：将text字段转换为对话格式
+                        # TREX格式的text通常是完整的对话文本，包含<|im_start|>和<|im_end|>标记
+                        text = data['text']
+                        # 简单处理：将text作为assistant的回复，创建一个简单的对话
+                        converted_data = {
+                            'conversations': [
+                                {
+                                    'role': 'user',
+                                    'content': '请根据以下内容回答问题。'
+                                },
+                                {
+                                    'role': 'assistant',
+                                    'content': text.replace('<|im_start|>', '').replace('<|im_end|>', '').strip()
+                                }
+                            ]
+                        }
+                        samples.append(converted_data)
+                    elif 'conversations' in data:
+                        # 标准对话格式
+                        samples.append(data)
+                    else:
+                        skipped_count += 1
+                        if skipped_count <= 20:  # 只显示前20个警告
+                            print(f"[警告] 跳过第{line_num}行: 缺少conversations或text字段")
+                        continue
                 except Exception as e:
-                    print(f"[警告] 跳过第{line_num}行: {e}")
+                    skipped_count += 1
+                    if skipped_count <= 20:
+                        print(f"[警告] 跳过第{line_num}行: {e}")
                     continue
 
         print(f"成功加载 {len(samples)} 个评估样本")
+        if skipped_count > 20:
+            print(f"[警告] 还有 {skipped_count - 20} 个样本被跳过")
         return samples
 
     def __len__(self) -> int:

@@ -15,11 +15,11 @@ TrainingConf = builds(
     transformers_version="4.57.0",
     # ---- 原 trainer 字段 ----
     # DeepSpeed / Accelerator
-    zero_stage=2,                # ZeRO-2
+    zero_stage=3,                # ZeRO-3
     mixed_precision="bf16",      # 混合精度
     seed=1337,                   # 随机种子
     devices="auto",              # 多卡
-    strategy="deepspeed_stage_2",
+    strategy="deepspeed_stage_3",
     log_interval=10,
     populate_full_signature=False,
 

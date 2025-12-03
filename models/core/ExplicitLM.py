@@ -1,12 +1,13 @@
 """
-ExplicitLM: 基于显式记忆增强的语言模型
+ExplicitLM: 基于显式记忆增强的语言模型（基于Qwen3架构）
 
-该模型实现了一个创新的Transformer架构，使用显式记忆库替代传统的FFN层：
+该模型在Qwen3架构的基础上添加了显式记忆库机制：
+- 使用Qwen3的预训练backbone（Attention + MLP）
+- 在MLP输出后添加记忆检索和融合机制
 - 共享记忆库存储可学习的token序列
 - EMA更新机制实现类似VQ-VAE的codebook更新
 - 支持记忆冻结策略以保护重要知识
 - 多损失优化系统（相似度损失+多样性损失）
-- 无KV缓存的流式生成能力
 """
 
 from typing import Dict, List, Optional, Union, Iterator
@@ -16,141 +17,179 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PreTrainedModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.models.qwen3.modeling_qwen3 import (
+    Qwen3Config,
+    Qwen3Model,
+    Qwen3RotaryEmbedding,
+    Qwen3RMSNorm,
+    Cache,
+    DynamicCache,
+    create_causal_mask,
+    create_sliding_window_causal_mask,
+)
+from transformers.utils import TransformersKwargs
+from typing import Unpack
 
-from models.configs.LMConfig import LMConfig
-from models.core.ExplicitLMBlock import ExplicitLMBlock
-from models.layers.RMSNorm import RMSNorm
-from models.layers.pos_cis import precompute_pos_cis
+from models.core.Qwen3ExplicitLMBlock import Qwen3ExplicitLMBlock
 
 
 class ExplicitLM(PreTrainedModel):
     """
-    基于显式记忆增强的因果语言模型
+    基于显式记忆增强的因果语言模型（基于Qwen3架构）
 
-    该模型通过共享记忆库增强Transformer架构，记忆库存储token序列并通过
-    EMA机制动态更新，实现了更高效的知识存储和检索机制。
+    该模型在Qwen3架构的基础上添加了显式记忆库机制，通过共享记忆库增强
+    Transformer架构，记忆库存储token序列并通过EMA机制动态更新。
     """
 
-    config_class = LMConfig
+    config_class = Qwen3Config
 
-    def __init__(self, cfg: dict) -> None:
+    def __init__(self, qwen3_config: Qwen3Config, memory_cfg: dict) -> None:
         """
         初始化ExplicitLM模型
 
         Args:
-            cfg: 模型配置字典，包含所有超参数
+            qwen3_config: Qwen3Config配置对象，包含Qwen3的所有架构参数
+            memory_cfg: 记忆库相关配置字典，包含knowledge_num, knowledge_dim等
         """
-        # 先构造空配置满足父类检查
-        dummy_config = LMConfig()
-        super().__init__(dummy_config)
-        self.cfg = cfg
-
-        # ===== 基础架构组件 =====
-        self.vocab_size: int = cfg["vocab_size"]
-        self.n_layers: int = cfg["n_layers"]
-
-        # Token嵌入层和输出层（权重共享）
-        self.tok_embeddings = nn.Embedding(cfg["vocab_size"], cfg["dim"])
-        self.dropout = nn.Dropout(cfg["dropout"])
-        self.output = nn.Linear(cfg["dim"], cfg["vocab_size"], bias=False)
-        self.tok_embeddings.weight = self.output.weight  # 权重绑定
-
-        # Transformer层堆叠
-        self.layers = nn.ModuleList(
-            [ExplicitLMBlock(l, cfg) for l in range(self.n_layers)]
+        super().__init__(qwen3_config)
+        self.config = qwen3_config
+        self.memory_cfg = memory_cfg
+        
+        # ===== 使用Qwen3的基础组件 =====
+        self.vocab_size = qwen3_config.vocab_size
+        self.hidden_size = qwen3_config.hidden_size
+        
+        # Token嵌入层（使用Qwen3的embed_tokens）
+        self.embed_tokens = nn.Embedding(
+            qwen3_config.vocab_size, 
+            qwen3_config.hidden_size, 
+            qwen3_config.pad_token_id
         )
-
-        # 最终归一化层
-        self.norm = RMSNorm(cfg["dim"], eps=cfg["norm_eps"])
-
-        # 位置编码预计算（RoPE）
-        self.register_buffer(
-            "pos_cis",
-            precompute_pos_cis(
-               cfg
-            ),
-            persistent=False,
-        )
-
-        # ===== 共享记忆库初始化 =====
-        if cfg["use_ema_update"]:
-            self.memory_bank = nn.Parameter(
-                torch.randint(
-                    0, cfg["vocab_size"], (cfg["knowledge_num"], cfg["knowledge_length"])
-                ),
-                requires_grad=False,
-            )
+        
+        # 位置编码（使用Qwen3的rotary_emb）
+        self.rotary_emb = Qwen3RotaryEmbedding(config=qwen3_config)
+        
+        # Transformer层堆叠（使用Qwen3ExplicitLMBlock）
+        self.layers = nn.ModuleList([
+            Qwen3ExplicitLMBlock(qwen3_config, layer_idx, memory_cfg)
+            for layer_idx in range(qwen3_config.num_hidden_layers)
+        ])
+        
+        # 最终归一化层（使用Qwen3的RMSNorm）
+        self.norm = Qwen3RMSNorm(qwen3_config.hidden_size, eps=qwen3_config.rms_norm_eps)
+        
+        # 输出层（lm_head，与embed_tokens权重共享由Qwen3Config控制）
+        self.lm_head = nn.Linear(qwen3_config.hidden_size, qwen3_config.vocab_size, bias=False)
+        
+        # 用于记忆库解码的token嵌入（与embed_tokens共享或独立）
+        # 如果Qwen3Config中tie_word_embeddings=True，则共享权重
+        if qwen3_config.tie_word_embeddings:
+            self.tok_embeddings = self.embed_tokens
         else:
-            self.memory_bank = nn.Parameter(
+            self.tok_embeddings = nn.Embedding(
+                qwen3_config.vocab_size,
+                qwen3_config.hidden_size,
+                qwen3_config.pad_token_id
+            )
+
+        # ===== 共享记忆库初始化（仅记忆库模式需要） =====
+        use_moe = memory_cfg.get("use_moe", False)
+        if not use_moe:
+            # 记忆库模式：初始化 memory_bank
+            knowledge_num = memory_cfg["knowledge_num"]
+            knowledge_length = memory_cfg["knowledge_length"]
+            
+            # memory_bank存储的是token IDs（int64），不应该直接通过梯度更新
+            # 使用register_buffer而不是nn.Parameter，避免DeepSpeed处理其梯度
+            # memory_bank通过EMA机制更新，而不是梯度更新
+            self.register_buffer(
+                "memory_bank",
                 torch.randint(
-                    0, cfg["vocab_size"], (cfg["knowledge_num"], cfg["knowledge_length"])
+                    0, qwen3_config.vocab_size, (knowledge_num, knowledge_length)
                 ),
-                requires_grad=True,
+                persistent=True,  # 持久化，确保保存和加载时包含
             )
 
-        # ===== EMA更新相关缓冲区 =====
-        if cfg["use_ema_update"]:
+            # ===== EMA更新相关缓冲区 =====
+            if memory_cfg.get("use_ema_update", False):
+                self.register_buffer(
+                    "ema_update_count",
+                    torch.zeros(knowledge_num),
+                    persistent=False,
+                )
+                self.register_buffer(
+                    "ema_step_counter",
+                    torch.zeros(1, dtype=torch.long),
+                    persistent=False,
+                )
+
+            # 记录上一步的记忆库状态
             self.register_buffer(
-                "ema_update_count",
-                torch.zeros(cfg["knowledge_num"]),
+                "prev_memory_bank",
+                torch.zeros_like(self.memory_bank),
                 persistent=False,
             )
-            self.register_buffer(
-                "ema_step_counter",
-                torch.zeros(1, dtype=torch.long),
-                persistent=False,
-            )
 
-        # 记录上一步的记忆库状态
-        self.register_buffer(
-            "prev_memory_bank",
-            torch.zeros_like(self.memory_bank),
-            persistent=False,
-        )
-
-        # ===== 记忆冻结机制 =====
-        if cfg["freeze_ratio"] > 0.0:
-            freeze_num = int(cfg["knowledge_num"] * cfg["freeze_ratio"])
-            freeze_mask = torch.zeros(cfg["knowledge_num"], dtype=torch.bool)
-            freeze_mask[:freeze_num] = True
-            self.register_buffer("freeze_mask", freeze_mask, persistent=False)
-            print(
-                f"🔥 Memory bank freezing enabled: {freeze_num}/{cfg['knowledge_num']} "
-                f"entries ({cfg['freeze_ratio']*100:.1f}%) frozen",
-                flush=True,
-            )
+            # ===== 记忆冻结机制 =====
+            freeze_ratio = memory_cfg.get("freeze_ratio", 0.0)
+            if freeze_ratio > 0.0:
+                freeze_num = int(knowledge_num * freeze_ratio)
+                freeze_mask = torch.zeros(knowledge_num, dtype=torch.bool)
+                freeze_mask[:freeze_num] = True
+                self.register_buffer("freeze_mask", freeze_mask, persistent=False)
+                print(
+                    f"🔥 Memory bank freezing enabled: {freeze_num}/{knowledge_num} "
+                    f"entries ({freeze_ratio*100:.1f}%) frozen",
+                    flush=True,
+                )
+            else:
+                self.register_buffer(
+                    "freeze_mask",
+                    torch.zeros(knowledge_num, dtype=torch.bool),
+                    persistent=False,
+                )
+                print("🔥 Memory bank freezing disabled: all entries can be updated", flush=True)
         else:
-            self.register_buffer(
-                "freeze_mask",
-                torch.zeros(cfg["knowledge_num"], dtype=torch.bool),
-                persistent=False,
-            )
-            print("🔥 Memory bank freezing disabled: all entries can be updated", flush=True)
+            # MOE 模式：不需要 memory_bank
+            self.memory_bank = None
+            print("🔥 MOE mode enabled: using Mixture of Experts instead of memory bank", flush=True)
 
         # 输出容器
         self.OUT = CausalLMOutputWithPast()
+        
+        # 初始化权重
+        self.post_init()
 
-    # ---------------- 以下函数仅把 self.params 换成 self.cfg ----------------
     def get_memory_update_stats(self) -> Dict[str, float]:
+        # MOE 模式下不返回记忆库统计信息
+        if self.memory_cfg.get("use_moe", False) or self.memory_bank is None:
+            return {
+                "memory_avg_l2_change": 0.0,
+                "memory_max_l2_change": 0.0,
+                "memory_cosine_similarity": 1.0,
+                "memory_update_rate": 0.0,
+                "memory_updated_count": 0,
+            }
         with torch.no_grad():
             if hasattr(self, "prev_memory_bank") and self.prev_memory_bank.numel() > 0:
-                l2_distance = torch.norm(
-                    self.memory_bank - self.prev_memory_bank, p=2, dim=-1
-                )
-                avg_l2_distance = l2_distance.mean().item()
-                max_l2_distance = l2_distance.max().item()
-                cos_sim = F.cosine_similarity(
-                    self.memory_bank.view(-1),
-                    self.prev_memory_bank.view(-1),
-                    dim=0,
-                ).item()
-                threshold = 0.01
-                updated_memories = (l2_distance > threshold).sum().item()
+                # memory_bank存储的是token IDs（int64），不能直接计算L2距离
+                # 改为计算token差异：有多少个token不同
+                token_diff = (self.memory_bank != self.prev_memory_bank).sum(dim=-1).float()  # [knowledge_num]
+                avg_token_diff = token_diff.mean().item()
+                max_token_diff = token_diff.max().item()
+                
+                # 计算完全相同的记忆条目比例作为相似度
+                identical_memories = (token_diff == 0).sum().item()
+                similarity = identical_memories / self.memory_bank.size(0)
+                
+                # 更新阈值：如果至少有一个token不同，则认为更新了
+                threshold = 0.5  # 至少有一个token不同
+                updated_memories = (token_diff >= threshold).sum().item()
                 update_rate = updated_memories / self.memory_bank.size(0)
                 update_stats = {
-                    "memory_avg_l2_change": avg_l2_distance,
-                    "memory_max_l2_change": max_l2_distance,
-                    "memory_cosine_similarity": cos_sim,
+                    "memory_avg_l2_change": avg_token_diff,  # 实际上是平均token差异数
+                    "memory_max_l2_change": max_token_diff,  # 实际上是最大token差异数
+                    "memory_cosine_similarity": similarity,  # 完全相同的记忆条目比例
                     "memory_update_rate": update_rate,
                     "memory_updated_count": updated_memories,
                 }
@@ -167,55 +206,187 @@ class ExplicitLM(PreTrainedModel):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor] = None,
-        **args,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        collect_ema_stats: Optional[bool] = None,
+        step: Optional[int] = None,  # 兼容旧接口（已废弃）
+        **kwargs: Unpack[TransformersKwargs],
     ) -> CausalLMOutputWithPast:
-        start_pos: int = args.get("start_pos", 0)
-        collect_ema_stats: bool = args.get(
-            "collect_ema_stats",
-            self.cfg["use_ema_update"] and self.training,
-        )
-
-        h = self.dropout(self.tok_embeddings(input_ids))
-        pos_cis = self.pos_cis[start_pos : start_pos + input_ids.size(1)]
-
-        total_similarity_loss = torch.tensor(0.0, device=h.device)
-        total_diversity_loss = torch.tensor(0.0, device=h.device)
+        """
+        前向传播
+        
+        Args:
+            input_ids: 输入token IDs（兼容旧接口：可以直接传入tensor作为位置参数）
+            attention_mask: 注意力掩码
+            position_ids: 位置IDs
+            past_key_values: KV缓存
+            inputs_embeds: 输入嵌入（可选，与input_ids二选一）
+            use_cache: 是否使用缓存
+            cache_position: 缓存位置
+            collect_ema_stats: 是否收集EMA统计信息
+            step: 当前步数（兼容旧接口，已废弃，不再使用）
+        """
+        # 兼容旧接口：如果input_ids是第一个位置参数传入的tensor
+        # Python会将位置参数作为input_ids传入，所以这里直接处理即可
+        
+        if input_ids is None and inputs_embeds is None:
+            raise ValueError("You must specify either input_ids or inputs_embeds")
+        
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
+        
+        if use_cache and past_key_values is None:
+            past_key_values = DynamicCache(config=self.config)
+        
+        if cache_position is None:
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            cache_position = torch.arange(
+                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+            )
+        
+        if position_ids is None:
+            position_ids = cache_position.unsqueeze(0)
+        
+        # 准备注意力掩码
+        if not isinstance(causal_mask_mapping := attention_mask, dict):
+            mask_kwargs = {
+                "config": self.config,
+                "input_embeds": inputs_embeds,
+                "attention_mask": attention_mask,
+                "cache_position": cache_position,
+                "past_key_values": past_key_values,
+                "position_ids": position_ids,
+            }
+            causal_mask_mapping = {
+                "full_attention": create_causal_mask(**mask_kwargs),
+            }
+            if hasattr(self.config, "layer_types") and "sliding_attention" in self.config.layer_types:
+                causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
+        
+        hidden_states = inputs_embeds
+        
+        # 生成位置嵌入
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        
+        # 设置EMA统计收集
+        if collect_ema_stats is None:
+            collect_ema_stats = self.memory_cfg.get("use_ema_update", False) and self.training
+        
+        total_similarity_loss = torch.tensor(0.0, device=hidden_states.device)
+        total_diversity_loss = torch.tensor(0.0, device=hidden_states.device)
+        total_moe_aux_loss = torch.tensor(0.0, device=hidden_states.device)
         all_layer_stats: Dict[str, float] = {}
         all_ema_stats: Dict[str, Dict] = {}
         all_cosine_stats: Dict[str, Union[torch.Tensor, float]] = {}
-
+        
+        use_moe = self.memory_cfg.get("use_moe", False)
+        
+        # 通过所有层
         for layer_idx, layer in enumerate(self.layers):
-            if collect_ema_stats:
-                h, sim_loss, div_loss, layer_stats, ema_stats, cosine_stats = layer(
-                    h, pos_cis, self.memory_bank, self.tok_embeddings, collect_ema_stats=True
-                )
-                all_ema_stats[f"layer_{layer_idx}"] = ema_stats
+            layer_attention_mask = causal_mask_mapping.get(
+                getattr(layer.qwen3_decoder, "attention_type", "full_attention"),
+                causal_mask_mapping["full_attention"]
+            )
+            
+            if use_moe:
+                # MOE 模式
+                if collect_ema_stats:
+                    hidden_states, sim_loss, div_loss, layer_stats, ema_stats, cosine_stats = layer(
+                        hidden_states=hidden_states,
+                        attention_mask=layer_attention_mask,
+                        position_ids=position_ids,
+                        past_key_values=past_key_values,
+                        use_cache=use_cache,
+                        cache_position=cache_position,
+                        position_embeddings=position_embeddings,
+                        collect_ema_stats=True,
+                        **kwargs,
+                    )
+                    all_ema_stats[f"layer_{layer_idx}"] = ema_stats
+                else:
+                    hidden_states, sim_loss, div_loss, layer_stats, cosine_stats = layer(
+                        hidden_states=hidden_states,
+                        attention_mask=layer_attention_mask,
+                        position_ids=position_ids,
+                        past_key_values=past_key_values,
+                        use_cache=use_cache,
+                        cache_position=cache_position,
+                        position_embeddings=position_embeddings,
+                        collect_ema_stats=False,
+                        **kwargs,
+                    )
+                if "moe_aux_loss" in layer_stats:
+                    moe_aux = layer_stats["moe_aux_loss"]
+                    if isinstance(moe_aux, (int, float)):
+                        total_moe_aux_loss += torch.tensor(moe_aux, device=hidden_states.device)
+                    elif isinstance(moe_aux, torch.Tensor):
+                        total_moe_aux_loss += moe_aux
             else:
-                h, sim_loss, div_loss, layer_stats, cosine_stats = layer(
-                    h, pos_cis, self.memory_bank, self.tok_embeddings, collect_ema_stats=False
-                )
-            total_similarity_loss += sim_loss
-            total_diversity_loss += div_loss
+                # 记忆库模式
+                if collect_ema_stats:
+                    hidden_states, sim_loss, div_loss, layer_stats, ema_stats, cosine_stats = layer(
+                        hidden_states=hidden_states,
+                        attention_mask=layer_attention_mask,
+                        position_ids=position_ids,
+                        past_key_values=past_key_values,
+                        use_cache=use_cache,
+                        cache_position=cache_position,
+                        position_embeddings=position_embeddings,
+                        memory_bank=self.memory_bank,
+                        tok_embeddings=self.tok_embeddings,
+                        collect_ema_stats=True,
+                        **kwargs,
+                    )
+                    all_ema_stats[f"layer_{layer_idx}"] = ema_stats
+                else:
+                    hidden_states, sim_loss, div_loss, layer_stats, cosine_stats = layer(
+                        hidden_states=hidden_states,
+                        attention_mask=layer_attention_mask,
+                        position_ids=position_ids,
+                        past_key_values=past_key_values,
+                        use_cache=use_cache,
+                        cache_position=cache_position,
+                        position_embeddings=position_embeddings,
+                        memory_bank=self.memory_bank,
+                        tok_embeddings=self.tok_embeddings,
+                        collect_ema_stats=False,
+                        **kwargs,
+                    )
+                total_similarity_loss += sim_loss
+                total_diversity_loss += div_loss
+            
             for k, v in layer_stats.items():
                 all_layer_stats[f"layer_{layer_idx}_{k}"] = v
             for k, v in cosine_stats.items():
                 all_cosine_stats[f"layer_{layer_idx}_{k}"] = v
-
-        logits = self.output(self.norm(h))
+        
+        # 最终归一化和输出
+        hidden_states = self.norm(hidden_states)
+        logits = self.lm_head(hidden_states)
+        
         n_layers = len(self.layers)
-        aux_loss = {
-            "similarity_loss": total_similarity_loss / n_layers,
-            "diversity_loss": total_diversity_loss / n_layers,
-        }
-
-        self.OUT.__setitem__("last_hidden_state", h)
+        if use_moe:
+            aux_loss = {
+                "moe_aux_loss": total_moe_aux_loss / n_layers,
+            }
+        else:
+            aux_loss = {
+                "similarity_loss": total_similarity_loss / n_layers,
+                "diversity_loss": total_diversity_loss / n_layers,
+            }
+        
+        self.OUT.__setitem__("last_hidden_state", hidden_states)
         self.OUT.__setitem__("logits", logits)
         self.OUT.__setitem__("aux_loss", aux_loss)
         self.OUT.__setitem__("layer_stats", all_layer_stats)
         self.OUT.__setitem__("ema_stats", all_ema_stats if collect_ema_stats else None)
         self.OUT.__setitem__("cosine_stats", all_cosine_stats)
-        self.OUT.__setitem__("past_key_values", None)
+        self.OUT.__setitem__("past_key_values", past_key_values if use_cache else None)
         return self.OUT
 
     # ---------------- generate / stream / ema 更新 ----------------
@@ -303,19 +474,19 @@ class ExplicitLM(PreTrainedModel):
                 break
 
     def apply_ema_update(self, ema_stats: Dict[str, Dict]) -> Dict[str, Union[bool, int, float]]:
-        if not self.cfg["use_ema_update"]:
+        # MOE 模式下不支持 EMA 更新
+        if self.memory_cfg.get("use_moe", False) or self.memory_bank is None:
+            return {"ema_update_applied": False, "reason": "moe_mode"}
+        if not self.memory_cfg.get("use_ema_update", False):
             return {}
         self.ema_step_counter += 1
-        if self.ema_step_counter % self.cfg["ema_update_freq"] != 0:
+        if self.ema_step_counter % self.memory_cfg["ema_update_freq"] != 0:
             return {"ema_update_applied": False, "reason": "frequency_check_failed"}
 
-        # 以下逻辑与原版完全一致，仅把 self.params 换 self.cfg
-        # 篇幅原因省略，已验证无额外改动
-        # （直接拷贝你原来的实现即可）
         with torch.no_grad():
             device = self.memory_bank.device
             knowledge_num, knowledge_length = self.memory_bank.shape
-            dim = self.cfg["dim"]
+            dim = self.hidden_size
 
             all_indices: List[torch.Tensor] = []
             all_features: List[torch.Tensor] = []
@@ -355,7 +526,8 @@ class ExplicitLM(PreTrainedModel):
             )
             avg_features = aggregated_features / count_per_memory.unsqueeze(1)
 
-            batch_size = 4096
+            # 减小批次大小以节省显存，避免lm_head输出过大
+            batch_size = 512  # 从4096减小到512，减少lm_head的内存占用
             updated_memories = 0
             for i in range(0, unique_indices.size(0), batch_size):
                 end_i = min(i + batch_size, unique_indices.size(0))
@@ -370,11 +542,11 @@ class ExplicitLM(PreTrainedModel):
                 )
                 expanded_new_features = batch_avg_features.repeat(1, knowledge_length)
                 updated_features_batch = (
-                    self.cfg["ema_decay"] * old_features_batch
-                    + (1 - self.cfg["ema_decay"]) * expanded_new_features
+                    self.memory_cfg["ema_decay"] * old_features_batch
+                    + (1 - self.memory_cfg["ema_decay"]) * expanded_new_features
                 )
                 updated_reshaped = updated_features_batch.view(-1, dim)
-                logits_batch = self.output(updated_reshaped)
+                logits_batch = self.lm_head(updated_reshaped)
                 new_token_ids_batch = torch.argmax(logits_batch, dim=-1).view(
                     batch_indices.size(0), knowledge_length
                 )
@@ -396,7 +568,7 @@ class ExplicitLM(PreTrainedModel):
                 "update_ratio": updated_memories / knowledge_num,
                 "frozen_memories": frozen_count,
                 "frozen_ratio": frozen_count / total_memories,
-                "ema_decay": self.cfg["ema_decay"],
+                "ema_decay": self.memory_cfg["ema_decay"],
                 "selected_memory_coverage": updated_memories / knowledge_num,
             }
             return update_stats
