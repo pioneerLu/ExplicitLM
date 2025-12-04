@@ -35,9 +35,6 @@ ModelConf = builds(
     gumbel_temperature=1.0,
     norm_topk_prob=True,
     scoring_func="softmax",
-    # EMA
-    use_ema_update=True,
-    ema_decay=0.9,
-    ema_update_freq=5,
+    # Memory bank在训练时固定，推理时通过LLMLingua更新（不再使用EMA）
     populate_full_signature=False,
 )

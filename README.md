@@ -6,9 +6,10 @@ ExplicitLM 是一个创新的语言模型架构，通过引入显式记忆库（
 
 - **Qwen3 基础架构**：基于 Qwen3-4B 预训练模型，保持强大的语言理解能力
 - **显式记忆库**：将知识以 token 序列形式显式存储，支持直接查看和修改
-- **动态知识更新**：通过 EMA 机制和事实提取实现记忆库的动态更新
+- **动态知识更新**：训练时记忆库固定，推理时通过 LLMLingua 事实提取实现记忆库的动态更新
 - **双路推理**：主路生成文本，辅路提取事实并更新知识库
 - **参数高效训练**：冻结 Qwen3 主模型参数，只训练记忆融合组件
+- **Shortcut 机制**：即使没有相关知识，backbone 也能正常工作，确保模型鲁棒性
 
 ## 📁 项目结构
 
@@ -73,7 +74,6 @@ args = {
     'knowledge_num': 1024 * 1024,            # 记忆库条目数（1048576）
     'knowledge_length': 16,                  # 每个记忆条目的token数
     'knowledge_dim': 128,                     # 记忆嵌入维度
-    'use_ema_update': False,                 # 是否使用EMA更新
     'use_moe': False,                        # 是否使用MOE模式
     'num_candidates': 8,                     # 候选记忆条目数
     'num_selected': 1,                       # 选中的记忆条目数
@@ -172,13 +172,13 @@ python 1_pretrain.py \
 | `num_selected` | 第二阶段选中的条目数 | 1 |
 | `gumbel_temperature` | Gumbel-Softmax 温度 | 1.0 |
 
-### 更新机制参数
+### 记忆更新机制
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `use_ema_update` | 是否使用 EMA 更新 | False |
-| `ema_decay` | EMA 衰减率 | 0.9 |
 | `freeze_ratio` | 冻结的记忆条目比例 | 0.2 |
+
+**注意**：记忆库在训练时固定，推理时通过 LLMLingua 进行动态更新。
 
 ### 知识库初始化参数
 
@@ -193,27 +193,39 @@ python 1_pretrain.py \
 ExplicitLM 采用参数高效训练策略：
 
 - **Qwen3 主模型**：完全冻结（`requires_grad=False`）
+- **记忆库（Memory Bank）**：训练时固定（`requires_grad=False`），推理时通过 LLMLingua 更新
 - **记忆融合组件**：可训练
   - `memory_gate`：记忆门控层
-  - `gated_memory_fusion`：门控融合模块
+  - `gated_memory_fusion`：门控融合模块（包含 Shortcut 机制）
   - `memory_norm`：记忆归一化层
 
 这种策略确保：
 - 保持 Qwen3 的预训练知识
 - 只训练记忆融合机制
 - 大幅减少可训练参数数量
+- 通过 Shortcut 机制确保 backbone 独立工作能力
 
 ## 🔄 双路推理机制
 
 ### 主路：文本生成
 - 使用 Qwen3 主模型进行标准文本生成
 - 融合显式记忆库中的相关知识
-- 通过门控机制控制知识融合强度
+- 通过 Shortcut 机制和门控权重控制知识融合强度
+- **Shortcut 机制**：即使没有相关知识或相似度较低，backbone 仍能正常工作
 
 ### 辅路：事实提取与更新
 - 使用 LLMLingua 压缩技术提取关键事实
 - 将提取的事实更新到记忆库
 - 支持多种更新策略（FIFO、相似度替换等）
+
+### Shortcut 机制详解
+
+Shortcut 机制确保模型鲁棒性：
+- **公式**：`output = hidden_states + alpha * memory_output`
+- **alpha 计算**：基于相似度分数动态计算，范围 [0, 1]
+  - 相似度高 → alpha 接近 1 → memory 贡献大
+  - 相似度低 → alpha 接近 0 → memory 贡献小，backbone 独立工作
+- **优势**：即使知识库中没有相关信息，模型仍能基于 Qwen3 的预训练知识正常回答
 
 ## 📝 数据格式
 

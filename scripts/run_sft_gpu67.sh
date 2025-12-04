@@ -8,6 +8,9 @@ export CUDA_VISIBLE_DEVICES=6,7
 # 设置PyTorch内存分配配置
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 
+# 设置SwanLab API Key
+export SWANLAB_API_KEY=GtiI1qjU5lco6MKKSrRmN
+
 # 进入项目目录
 cd /data2/zengzheni/lvchangwei/new_repo/ExplicitLM
 
@@ -43,12 +46,12 @@ PRETRAINED_MODEL_PATH="out/pretrain_latest.pth"
 SFT_DATASET_PATH="sft_data/omcq_trex_sft.jsonl"
 SFT_VAL_DATASET_PATH="data/benchmarks/eval_data.json"
 
-# 训练超参数
+# 训练超参数（优化内存使用）
 LEARNING_RATE=5e-5
-BATCH_SIZE=4
-ACCUMULATION_STEPS=32
+BATCH_SIZE=1  # 进一步减小批次大小：2 -> 1，避免OOM（Qwen3-4B hidden_size=2560，内存消耗大）
+ACCUMULATION_STEPS=128  # 相应增加梯度累积：64 -> 128，保持有效批次大小
 EPOCHS=3
-MAX_SEQ_LEN=512
+MAX_SEQ_LEN=256  # 保持256，进一步减小可能影响训练效果
 
 echo ""
 echo "=========================================="

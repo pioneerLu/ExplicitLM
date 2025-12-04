@@ -101,20 +101,46 @@ def eval_model_sft(
 
     with torch.no_grad():
         for step, batch in enumerate(eval_loader):
-            # 验证 batch size = 1（当前实现的假设）
-            if not (isinstance(batch, tuple) and len(batch) == 2):
-                Logger(f"⚠️ 评估数据格式错误，跳过 step {step}", accelerator)
+            # DataLoader返回的batch格式：当batch_size=1时，可能是：
+            # - tuple: (prompt_list, target_list) 其中每个都是长度为1的list
+            # - 或者直接是 (prompt, target) tuple
+            
+            # 处理不同的batch格式
+            if isinstance(batch, tuple) and len(batch) == 2:
+                prompt_input, std_output = batch
+                
+                # 如果prompt_input是list/tuple，取第一个元素
+                if isinstance(prompt_input, (list, tuple)):
+                    if len(prompt_input) > 0:
+                        prompt_input = prompt_input[0]
+                    else:
+                        Logger(f"警告: prompt_input 为空，跳过 step {step}", accelerator)
+                        continue
+                
+                # 如果std_output是list/tuple，取第一个元素
+                if isinstance(std_output, (list, tuple)):
+                    if len(std_output) > 0:
+                        std_output = std_output[0]
+                    else:
+                        Logger(f"警告: std_output 为空，跳过 step {step}", accelerator)
+                        continue
+                
+                # 确保prompt_input是字符串
+                if not isinstance(prompt_input, str):
+                    Logger(f"警告: prompt_input 不是字符串类型，跳过 step {step}", accelerator)
+                    continue
+                    
+                # 确保std_output是字符串
+                if not isinstance(std_output, str):
+                    Logger(f"警告: std_output 不是字符串类型，跳过 step {step}", accelerator)
+                    continue
+            else:
+                Logger(f"警告: 评估数据格式错误，跳过 step {step}", accelerator)
                 continue
 
-            prompt_input, std_output = batch
-
-            # 确保是单样本
-            if not (isinstance(prompt_input, (list, tuple)) and len(prompt_input) > 0):
-                Logger(f"⚠️ prompt_input 格式错误，跳过 step {step}", accelerator)
-                continue
-
-            prompt_input = prompt_input[0][-args.model.max_seq_len - 1:]
-            std_output = std_output[0] if isinstance(std_output, (list, tuple)) else std_output
+            # 截断prompt_input到最大长度
+            # 注意：这里假设prompt_input已经是完整的字符串，不需要再处理
+            # 如果需要截断，应该在tokenization之前进行
 
             # Tokenize输入
             try:
@@ -123,7 +149,7 @@ def eval_model_sft(
                     device=accelerator.device
                 ).unsqueeze(0)
             except Exception as e:
-                Logger(f"⚠️ Tokenization 失败 (step {step}): {e}", accelerator)
+                Logger(f"警告: Tokenization 失败 (step {step}): {e}", accelerator)
                 continue
 
             # 生成文本（需要 unwrap 访问自定义方法）
@@ -141,7 +167,7 @@ def eval_model_sft(
                     pad_token_id=tokenizer.pad_token_id
                 )
             except Exception as e:
-                Logger(f"⚠️ 生成失败 (step {step}): {e}", accelerator)
+                Logger(f"警告: 生成失败 (step {step}): {e}", accelerator)
                 continue
 
             # 解码生成的文本
@@ -151,7 +177,7 @@ def eval_model_sft(
                     skip_special_tokens=True
                 )
             except Exception as e:
-                Logger(f"⚠️ 解码失败 (step {step}): {e}", accelerator)
+                Logger(f"警告: 解码失败 (step {step}): {e}", accelerator)
                 continue
 
             # 判断是否匹配
@@ -192,7 +218,7 @@ def eval_model_sft(
 
     if accelerator.is_main_process:
         Logger(
-            f"📊 评估结果: 准确率={accuracy:.4f} ({total_correct}/{total_steps})",
+            f"评估结果: 准确率={accuracy:.4f} ({total_correct}/{total_steps})",
             accelerator
         )
 
@@ -303,23 +329,7 @@ def train_epoch_sft(
         optimizer.step()
         optimizer.zero_grad()
 
-        # VQ-VAE风格的EMA更新（仅在启用时执行）
-        if hasattr(res, 'ema_stats') and res.ema_stats is not None:
-            unwrapped_model = accelerator.unwrap_model(model)
-            if hasattr(unwrapped_model, 'apply_ema_update'):
-                ema_update_stats = unwrapped_model.apply_ema_update(res.ema_stats)
-
-                # 记录EMA更新统计信息
-                if (step + 1) % args.logging.log_interval == 0 and accelerator.is_main_process:
-                    if ema_update_stats.get('ema_update_applied', False):
-                        total_memories = args.model.knowledge_num
-                        Logger(
-                            f"EMA更新 - Step: {ema_update_stats['ema_step']}, "
-                            f"更新记忆数: {ema_update_stats['updated_memories']}/{total_memories} "
-                            f"({ema_update_stats['update_ratio']:.4f}), "
-                            f"覆盖率: {ema_update_stats['selected_memory_coverage']:.4f}",
-                            accelerator
-                        )
+        # Memory bank在训练时固定，推理时通过LLMLingua更新，不再需要EMA更新
 
         # 训练日志记录（仅主进程）
         if (step + 1) % args.logging.log_interval == 0 and accelerator.is_main_process:
@@ -385,18 +395,11 @@ def train_epoch_sft(
             # 添加记忆库更新统计
             log_dict.update(memory_update_stats)
 
-            # 控制台输出
             Logger(
-                f"Epoch {epoch+1}/{args.training.epochs}, Step {step+1}/{total_steps_in_epoch}, "
-                f"CE: {log_dict['train/loss_ce']:.4f}, "
-                f"Sim: {log_dict['train/loss_similarity']:.4f}, "
-                f"Div: {log_dict['train/loss_diversity']:.4f}, "
-                f"Total: {log_dict['train/loss_total']:.4f}, "
-                f"LR: {log_dict['lr']:.6f}, "
-                f"Speed: {log_dict['tokens_per_sec']:.2f} tokens/sec | "
-                f"Sel.Sim: {avg_selected_similarity:.4f} | "
-                f"Epoch剩余: {format_time(epoch_remaining_time)} | "
-                f"总剩余: {format_time(total_remaining_time)}",
+                f"Epoch {epoch+1}/{args.training.epochs}, Step {step+1}/{total_steps_in_epoch} | "
+                f"Loss: {log_dict['train/loss_total']:.4f} (CE:{log_dict['train/loss_ce']:.4f} "
+                f"Sim:{log_dict['train/loss_similarity']:.4f} Div:{log_dict['train/loss_diversity']:.4f}) | "
+                f"LR: {log_dict['lr']:.6f} | Speed: {log_dict['tokens_per_sec']:.0f} tok/s",
                 accelerator
             )
 
@@ -411,7 +414,7 @@ def train_epoch_sft(
         if (step + 1) % eval_interval == 0:
             if (step + 1) >= start_eval and eval_loader is not None:
                 if accelerator.is_main_process:
-                    Logger(f"🔍 开始SFT生成式评估...", accelerator)
+                    Logger(f"开始评估...", accelerator)
 
                 performance = eval_model_sft(
                     model=model,
@@ -438,7 +441,7 @@ def train_epoch_sft(
                         ckp = f'{args.logging.save_dir}/sft_best_acc_{args.model.dim}{moe_path}.pth'
                         unwrapped_model = accelerator.unwrap_model(model)
                         accelerator.save(unwrapped_model.state_dict(), ckp)
-                        Logger(f"✅ 最佳准确率模型已保存至 {ckp} (acc={best_accuracy:.4f})", accelerator)
+                        Logger(f"最佳准确率模型已保存: {ckp} (acc={best_accuracy:.4f})", accelerator)
 
         # 基于损失保存模型（仅主进程）
         if accelerator.is_main_process:
@@ -452,4 +455,4 @@ def train_epoch_sft(
 
                 # 保存模型参数
                 accelerator.save(unwrapped_model.state_dict(), ckp)
-                Logger(f"✅ 最佳损失模型已保存至 {ckp} (loss={best_loss:.4f})", accelerator)
+                Logger(f"最佳损失模型已保存: {ckp} (loss={best_loss:.4f})", accelerator)

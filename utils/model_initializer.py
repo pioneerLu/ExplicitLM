@@ -238,32 +238,16 @@ def _init_qwen3_model(args: dict, accelerator=None):
     cache_path = args.get("cache_path", "cache/knowledge_cache.pt")
     recompute_cache = args.get("recompute_cache", False)
 
-    Logger("=" * 60, accelerator)
-    Logger("🚀 开始模型初始化流程（Qwen3架构）", accelerator)
-    Logger("=" * 60, accelerator)
-    Logger(f"📋 模型配置信息:", accelerator)
-    Logger(f"  - Qwen3模型路径: {qwen3_model_path}", accelerator)
-    Logger(f"  - 数据库初始化路径: {database_init_path if database_init_path else '未指定'}", accelerator)
-    Logger(f"  - 缓存路径: {cache_path}", accelerator)
-    Logger(f"  - 重新计算缓存: {recompute_cache}", accelerator)
+    Logger("开始模型初始化流程（Qwen3架构）", accelerator)
     
-    # 加载Qwen3配置
-    Logger("📦 加载Qwen3配置...", accelerator)
     qwen3_config = Qwen3Config.from_pretrained(qwen3_model_path)
-    Logger(f"✅ Qwen3配置加载完成:", accelerator)
-    Logger(f"  - hidden_size: {qwen3_config.hidden_size}", accelerator)
-    Logger(f"  - num_hidden_layers: {qwen3_config.num_hidden_layers}", accelerator)
-    Logger(f"  - num_attention_heads: {qwen3_config.num_attention_heads}", accelerator)
-    Logger(f"  - vocab_size: {qwen3_config.vocab_size}", accelerator)
     
     # 提取记忆库配置
     memory_cfg = {
         "knowledge_num": args.get("knowledge_num", 1024 * 1024),
         "knowledge_length": args.get("knowledge_length", 16),
         "knowledge_dim": args.get("knowledge_dim", 128),
-        "use_ema_update": args.get("use_ema_update", True),
-        "ema_decay": args.get("ema_decay", 0.9),
-        "ema_update_freq": args.get("ema_update_freq", 5),
+        # Memory bank在训练时固定，推理时通过LLMLingua更新（不再使用EMA）
         "freeze_ratio": args.get("freeze_ratio", 0.2),
         "num_candidates": args.get("num_candidates", 16),
         "num_selected": args.get("num_selected", 1),
@@ -271,21 +255,8 @@ def _init_qwen3_model(args: dict, accelerator=None):
         "use_moe": args.get("use_moe", False),
         "dropout": args.get("dropout", 0.0),
     }
-    Logger(f"📋 记忆库配置:", accelerator)
-    Logger(f"  - knowledge_num: {memory_cfg['knowledge_num']}", accelerator)
-    Logger(f"  - knowledge_length: {memory_cfg['knowledge_length']}", accelerator)
-    Logger(f"  - knowledge_dim: {memory_cfg['knowledge_dim']}", accelerator)
-    
-    # 导入模型类
-    Logger("📦 导入模型模块...", accelerator)
     from models.core.ExplicitLM import ExplicitLM
     
-    # 输出当前目录
-    Logger(f"📍 当前工作目录: {os.getcwd()}", accelerator)
-    
-    # 加载 Qwen3 tokenizer
-    # 优先使用本地tokenizer路径，如果不存在则从Qwen模型路径加载
-    Logger("🔤 加载Qwen3 tokenizer...", accelerator)
     try:
         original_cwd = get_original_cwd()
     except ValueError:
@@ -304,20 +275,12 @@ def _init_qwen3_model(args: dict, accelerator=None):
         # Qwen tokenizer可能没有pad_token，使用eos_token作为pad_token
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.pad_token_id = tokenizer.eos_token_id
-        Logger("⚠️  Qwen tokenizer没有pad_token，使用eos_token作为pad_token", accelerator)
-    
-    Logger(f"✅ Tokenizer加载完成，词汇表大小: {len(tokenizer)}", accelerator)
-    Logger(f"  - pad_token: {tokenizer.pad_token} (id: {tokenizer.pad_token_id})", accelerator)
-    Logger(f"  - bos_token: {tokenizer.bos_token} (id: {tokenizer.bos_token_id})", accelerator)
-    Logger(f"  - eos_token: {tokenizer.eos_token} (id: {tokenizer.eos_token_id})", accelerator)
+        Logger("警告: Qwen tokenizer没有pad_token，使用eos_token作为pad_token", accelerator)
 
     # 创建模型
-    Logger("🏗️  创建模型实例...", accelerator)
     model = ExplicitLM(qwen3_config=qwen3_config, memory_cfg=memory_cfg)
-    Logger("✅ 模型实例创建完成", accelerator)
-    
+
     # 从Qwen3预训练模型加载权重
-    Logger("🎯 从Qwen3预训练模型加载权重...", accelerator)
     try:
         from transformers import Qwen3ForCausalLM
         pretrained_model = Qwen3ForCausalLM.from_pretrained(
@@ -389,14 +352,14 @@ def _init_qwen3_model(args: dict, accelerator=None):
                     missing_keys.append(key)
         
         model.load_state_dict(model_state_dict, strict=False)
-        Logger(f"✅ 权重加载完成: {len(loaded_keys)}个参数已加载", accelerator)
+        Logger(f"权重加载完成: {len(loaded_keys)}个参数", accelerator)
         if missing_keys:
-            Logger(f"⚠️  以下参数未加载（可能是新增的记忆相关参数）: {len(missing_keys)}个", accelerator)
+            Logger(f"警告: {len(missing_keys)}个参数未加载", accelerator)
             if len(missing_keys) <= 10:
                 for key in missing_keys[:10]:
                     Logger(f"    - {key}", accelerator)
         if shape_mismatches:
-            Logger(f"⚠️  以下参数形状不匹配: {len(shape_mismatches)}个", accelerator)
+            Logger(f"警告: {len(shape_mismatches)}个参数形状不匹配", accelerator)
             if len(shape_mismatches) <= 5:
                 for key in shape_mismatches[:5]:
                     Logger(f"    - {key}", accelerator)
@@ -406,15 +369,14 @@ def _init_qwen3_model(args: dict, accelerator=None):
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
         
     except Exception as e:
-        Logger(f"⚠️  从预训练模型加载权重失败: {e}", accelerator)
+        Logger(f"警告: 从预训练模型加载权重失败: {e}", accelerator)
         Logger("将使用随机初始化的权重", accelerator)
 
     # 数据库 / 记忆库初始化（MOE 模式下跳过）
     use_moe = memory_cfg.get("use_moe", False)
     if use_moe:
-        Logger("⚠️  MOE 模式：跳过记忆库初始化（MOE 模式不需要 memory_bank）", accelerator)
+        Logger("MOE 模式：跳过记忆库初始化", accelerator)
     elif database_init_path:
-        Logger("🗄️  开始记忆库初始化...", accelerator)
         Logger(f"  - 数据库路径: {database_init_path}", accelerator)
         Logger(f"  - 缓存路径: {cache_path}", accelerator)
         Logger(f"  - 知识库大小: {memory_cfg['knowledge_num']}", accelerator)
@@ -432,16 +394,13 @@ def _init_qwen3_model(args: dict, accelerator=None):
             database_attribute="memory_bank",
             accelerator=accelerator,
         )
-        Logger("✅ 记忆库初始化完成", accelerator)
     else:
-        Logger("⚠️  未指定数据库初始化路径，记忆库将使用随机初始化", accelerator)
+        Logger("警告: 未指定数据库初始化路径，记忆库将使用随机初始化", accelerator)
 
     # 冻结Qwen主模型参数，只保留记忆库相关参数可训练
     Logger("🔒 冻结Qwen主模型参数...", accelerator)
     frozen_params = 0
     trainable_params = 0
-    
-    use_ema_update = memory_cfg.get("use_ema_update", False)
     
     # 冻结所有Qwen基础组件
     for name, param in model.named_parameters():
@@ -452,8 +411,8 @@ def _init_qwen3_model(args: dict, accelerator=None):
             "memory_norm",  # 记忆归一化层
         ])
         
-        # memory_bank存储的是token IDs（int64），不应该直接通过梯度更新
-        # 应该通过EMA机制更新，所以始终设置为不可训练
+        # memory_bank存储的是token IDs（int64），训练时固定，推理时通过LLMLingua更新
+        # 所以始终设置为不可训练
         is_memory_bank = "memory_bank" in name
         if is_memory_bank:
             # memory_bank始终不可训练，避免DeepSpeed梯度平均时的类型错误
@@ -468,25 +427,12 @@ def _init_qwen3_model(args: dict, accelerator=None):
             param.requires_grad = False
             frozen_params += param.numel()
     
-    Logger(f"✅ 参数冻结完成:", accelerator)
-    Logger(f"  - 冻结参数: {frozen_params / 1e6:.3f} 百万", accelerator)
-    Logger(f"  - 可训练参数: {trainable_params / 1e6:.3f} 百万", accelerator)
-    if frozen_params + trainable_params > 0:
-        Logger(f"  - 冻结比例: {frozen_params / (frozen_params + trainable_params) * 100:.2f}%", accelerator)
-    
-    # 参数统计
-    Logger("📊 计算模型参数统计...", accelerator)
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
-    Logger(f"📈 可训练参数量：{total_params:.3f} 百万", accelerator)
-    
-    Logger("=" * 60, accelerator)
-    Logger("🎉 模型初始化流程完成", accelerator)
-    Logger("=" * 60, accelerator)
+    Logger(f"参数冻结完成: 冻结 {frozen_params / 1e6:.3f}M, 可训练 {trainable_params / 1e6:.3f}M", accelerator)
 
     return model, tokenizer
 
 
-# ---------- 以下辅助函数 ----------
 def _initialize_database(
     model: nn.Module,
     tokenizer: AutoTokenizer,
@@ -499,121 +445,34 @@ def _initialize_database(
     database_attribute: str,
     accelerator=None,
 ) -> None:
-    Logger("🔍 开始数据库/记忆库初始化详细流程", accelerator)
-    Logger(f"📊 初始化参数:", accelerator)
-    Logger(f"  - 模型类型: {model_type}", accelerator)
-    Logger(f"  - 数据库路径: {database_path}", accelerator)
-    Logger(f"  - 缓存路径: {cache_path}", accelerator)
-    Logger(f"  - 知识库大小: {knowledge_num}", accelerator)
-    Logger(f"  - 知识条目长度: {knowledge_length}", accelerator)
-    Logger(f"  - 重新计算缓存: {recompute}", accelerator)
-    Logger(f"  - 目标属性路径: {database_attribute}", accelerator)
-    
-    # 检查数据库文件是否存在
     if not os.path.exists(database_path):
-        Logger(f"❌ 错误: 数据库文件不存在: {database_path}", accelerator)
+        Logger(f"错误: 数据库文件不存在: {database_path}", accelerator)
         raise FileNotFoundError(f"数据库文件不存在: {database_path}")
     
-    # 获取数据库文件信息
-    try:
-        file_size = os.path.getsize(database_path)
-        file_size_mb = file_size / (1024 * 1024)
-        Logger(f"📁 数据库文件信息:", accelerator)
-        Logger(f"  - 文件大小: {file_size_mb:.2f} MB ({file_size:,} bytes)", accelerator)
-        Logger(f"  - 文件路径: {os.path.abspath(database_path)}", accelerator)
-    except Exception as e:
-        Logger(f"⚠️  无法获取数据库文件信息: {e}", accelerator)
-    
-    # 确保缓存目录存在
     cache_dir = os.path.dirname(cache_path)
     if cache_dir and not os.path.exists(cache_dir):
-        Logger(f"📁 创建缓存目录: {cache_dir}", accelerator)
         os.makedirs(cache_dir, exist_ok=True)
     
-    # 使用MemoryBankProcessor处理记忆库数据（Qwen3架构只支持memory_bank）
-    Logger("🧠 使用MemoryBankProcessor处理记忆库数据", accelerator)
-    processor = MemoryBankProcessor(tokenizer)
-    if not cache_path or cache_path == "cache/knowledge_cache.pt":
-        cache_path = f"cache/memory_bank_init_{knowledge_num}_{knowledge_length}.pt"
-        Logger(f"🔄 自动调整缓存路径为: {cache_path}", accelerator)
-    
-    Logger("🚀 开始处理记忆库数据...", accelerator)
-    start_time = time.time()
-    processed_tensor = processor.process_memory_bank(
-        database_path=database_path,
-        cache_path=cache_path,
-        knowledge_num=knowledge_num,
-        knowledge_length=knowledge_length,
-        recompute=recompute,
-    )
-    processing_time = time.time() - start_time
-    Logger(f"⏱️  记忆库数据处理完成，耗时: {processing_time:.2f} 秒", accelerator)
-    
-    # 验证处理后的张量
-    Logger("🔍 验证处理后的数据张量...", accelerator)
-    if processed_tensor is not None:
-        Logger(f"✅ 张量验证通过:", accelerator)
-        Logger(f"  - 张量形状: {processed_tensor.shape}", accelerator)
-        Logger(f"  - 张量类型: {processed_tensor.dtype}", accelerator)
-        Logger(f"  - 张量设备: {processed_tensor.device}", accelerator)
-        Logger(f"  - 内存占用: {processed_tensor.numel() * processed_tensor.element_size() / (1024*1024):.2f} MB", accelerator)
+        processor = MemoryBankProcessor(tokenizer)
+        if not cache_path or cache_path == "cache/knowledge_cache.pt":
+            cache_path = f"cache/memory_bank_init_{knowledge_num}_{knowledge_length}.pt"
         
-        # 检查数据范围
-        if processed_tensor.numel() > 0:
-            min_val = processed_tensor.min().item()
-            max_val = processed_tensor.max().item()
-            Logger(f"  - 数据范围: [{min_val}, {max_val}]", accelerator)
-            
-            # 检查是否有异常值
-            if min_val < 0:
-                Logger(f"⚠️  警告: 发现负值token ID，最小值: {min_val}", accelerator)
-            if hasattr(tokenizer, 'vocab_size') and max_val >= tokenizer.vocab_size:
-                Logger(f"⚠️  警告: 发现超出词汇表范围的token ID，最大值: {max_val}, 词汇表大小: {tokenizer.vocab_size}", accelerator)
-    else:
-        Logger("❌ 错误: 处理后的张量为None", accelerator)
+        start_time = time.time()
+        processed_tensor = processor.process_memory_bank(
+            database_path=database_path,
+            cache_path=cache_path,
+            knowledge_num=knowledge_num,
+            knowledge_length=knowledge_length,
+            recompute=recompute,
+        )
+    
+    if processed_tensor is None:
         raise ValueError("数据处理失败，返回的张量为None")
     
-    # 设置模型属性
-    Logger("🔧 设置模型数据库属性...", accelerator)
-    start_time = time.time()
     _set_database_attribute(model, database_attribute, processed_tensor, accelerator)
-    attribute_setting_time = time.time() - start_time
-    Logger(f"⏱️  模型属性设置完成，耗时: {attribute_setting_time:.4f} 秒", accelerator)
     
-    # 验证模型属性是否正确设置
-    Logger("🔍 验证模型属性设置...", accelerator)
-    attributes = database_attribute.split(".")
-    target = model
-    for attr in attributes[:-1]:
-        if hasattr(target, attr):
-            target = getattr(target, attr)
-        else:
-            Logger(f"❌ 错误: 无法找到中间属性 {attr}", accelerator)
-            return
-    
-    final_attr = attributes[-1]
-    if hasattr(target, final_attr):
-        stored_tensor = getattr(target, final_attr)
-        if torch.equal(stored_tensor, processed_tensor):
-            Logger(f"✅ 模型属性验证成功: model.{database_attribute}", accelerator)
-            Logger(f"  - 存储张量形状: {stored_tensor.shape}", accelerator)
-            Logger(f"  - 存储张量类型: {stored_tensor.dtype}", accelerator)
-            Logger(f"  - 存储张量设备: {stored_tensor.device}", accelerator)
-        else:
-            Logger(f"❌ 错误: 模型属性验证失败，存储的张量与原始张量不匹配", accelerator)
-    else:
-        Logger(f"❌ 错误: 无法找到目标属性 {final_attr}", accelerator)
-    
-    # 总体统计
     total_time = time.time() - start_time
-    Logger("📊 数据库/记忆库初始化统计:", accelerator)
-    Logger(f"  - 总处理时间: {total_time:.2f} 秒", accelerator)
-    Logger(f"  - 数据条目数: {processed_tensor.shape[0]}", accelerator)
-    Logger(f"  - 每条目长度: {processed_tensor.shape[1]}", accelerator)
-    Logger(f"  - 总token数: {processed_tensor.numel()}", accelerator)
-    Logger(f"  - 处理速度: {processed_tensor.numel() / total_time:.0f} tokens/秒", accelerator)
-    
-    Logger("✅ 数据库嵌入和句子已成功存储到模型", accelerator)
+    Logger(f"记忆库初始化完成: {processed_tensor.shape[0]}条目, 耗时{total_time:.2f}秒", accelerator)
 
 
 def _set_database_attribute(model: nn.Module, attribute_path: str, data: torch.Tensor, accelerator=None) -> None:
@@ -621,13 +480,12 @@ def _set_database_attribute(model: nn.Module, attribute_path: str, data: torch.T
     target = model
     for attr in attributes[:-1]:
         if not hasattr(target, attr):
-            Logger(f"警告: 找不到属性 {attr}，无法初始化数据库", accelerator)
+            Logger(f"警告: 找不到属性 {attr}", accelerator)
             return
         target = getattr(target, attr)
     final_attr = attributes[-1]
     if hasattr(target, final_attr):
         getattr(target, final_attr).data.copy_(data)
-        Logger(f"成功初始化 model.{attribute_path} 使用处理后的数据", accelerator)
     else:
-        Logger(f"警告: 找不到 model.{attribute_path} 进行初始化", accelerator)
+        Logger(f"警告: 找不到 model.{attribute_path}", accelerator)
         globals()["processed_database"] = data

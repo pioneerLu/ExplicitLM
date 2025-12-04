@@ -43,9 +43,6 @@ def main(cfg):
     tr_cfg = cfg.training
     proj_root = Path(get_original_cwd())
 
-    # ------------------------------------------------------------------
-    # 第二阶段：Accelerator + DeepSpeed
-    # ------------------------------------------------------------------
     # 配置 DDP 参数：允许未使用的参数（用于部分模型组件可能不参与梯度计算的情况）
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     ds_plugin = DeepSpeedPlugin(zero_stage=tr_cfg.zero_stage)
@@ -55,9 +52,6 @@ def main(cfg):
     )
     set_seed(tr_cfg.seed + accelerator.process_index)
 
-    # ------------------------------------------------------------------
-    # 第三阶段：目录 & SwanLab
-    # ------------------------------------------------------------------
     if accelerator.is_main_process:
         os.makedirs(l_cfg.out_dir, exist_ok=True)
         os.makedirs(l_cfg.save_dir, exist_ok=True)
@@ -67,22 +61,19 @@ def main(cfg):
         mode = "cloud" if l_cfg.swanlab_online else "offline"
         Logger(f"SwanLab 模式：{mode}", accelerator)
         Logger(f"SwanLab 运行中...", accelerator)
+        # 从环境变量获取API key，如果未设置则使用项目默认值
+        api_key = os.environ.get("SWANLAB_API_KEY", "GtiI1qjU5lco6MKKSrRmN")
         swanlab_run = swanlab.init(
             project=l_cfg.swanlab_project,
             experiment_name=f"ExplicitLM-SFT-{tr_cfg.epochs}e-{tr_cfg.batch_size}b-{tr_cfg.learning_rate}lr",
             config=instantiate(cfg),   # 把完整配置 flatten 上传
-            mode=mode
+            mode=mode,
+            api_key=api_key  # 使用项目特定的API key
         )
 
-    # ------------------------------------------------------------------
-    # 第四阶段：模型初始化
-    # ------------------------------------------------------------------
     model, tokenizer = init_model(m_cfg)
     Logger("模型架构初始化完成", accelerator)
 
-    # ------------------------------------------------------------------
-    # 第五阶段：加载预训练权重（SFT 必须步骤）
-    # ------------------------------------------------------------------
     if hasattr(d_cfg, 'pretrained_sft_model_path') and d_cfg.pretrained_sft_model_path:
         Logger(f"开始加载预训练权重: {d_cfg.pretrained_sft_model_path}", accelerator)
 
@@ -90,6 +81,12 @@ def main(cfg):
             # 加载预训练检查点
             pretrained_path = proj_root / d_cfg.pretrained_sft_model_path
             checkpoint = torch.load(pretrained_path, map_location='cpu')
+
+            # 记录检查点中包含的memory相关参数
+            memory_keys_in_checkpoint = [k for k in checkpoint.keys() if 'memory' in k.lower()]
+            if memory_keys_in_checkpoint:
+                Logger(f"检查点中包含 {len(memory_keys_in_checkpoint)} 个memory相关参数", accelerator)
+                Logger(f"示例: {memory_keys_in_checkpoint[:3]}{'...' if len(memory_keys_in_checkpoint) > 3 else ''}", accelerator)
 
             # 加载模型参数（使用 strict=False 允许部分加载）
             missing_keys, unexpected_keys = model.load_state_dict(checkpoint, strict=False)
@@ -101,6 +98,31 @@ def main(cfg):
 
             Logger(f"✓ 预训练权重加载完成（包括知识库参数）", accelerator)
 
+            # 重新确认参数冻结状态（确保加载权重后冻结状态不变）
+            Logger("🔒 重新确认参数冻结状态...", accelerator)
+            frozen_params = 0
+            trainable_params = 0
+            memory_bank_params = 0
+            
+            for name, param in model.named_parameters():
+                is_memory_component = any(keyword in name for keyword in [
+                    "memory_gate", "gated_memory_fusion", "memory_norm"
+                ])
+                is_memory_bank = "memory_bank" in name
+                
+                if is_memory_bank:
+                    param.requires_grad = False
+                    memory_bank_params += param.numel()
+                    frozen_params += param.numel()
+                elif is_memory_component:
+                    param.requires_grad = True
+                    trainable_params += param.numel()
+                else:
+                    param.requires_grad = False
+                    frozen_params += param.numel()
+            
+            Logger(f"参数冻结: 冻结 {frozen_params / 1e6:.3f}M, 可训练 {trainable_params / 1e6:.3f}M, Memory bank {memory_bank_params / 1e6:.3f}M", accelerator)
+
         except FileNotFoundError:
             Logger(f"错误: 预训练模型文件不存在: {pretrained_path}", accelerator)
             Logger("将从随机初始化开始训练（不推荐）", accelerator)
@@ -111,23 +133,21 @@ def main(cfg):
         Logger("警告: 未指定 pretrained_sft_model_path 参数", accelerator)
         Logger("SFT 训练通常需要加载预训练权重，当前将从随机初始化开始（不推荐）", accelerator)
 
-    # ------------------------------------------------------------------
-    # 第六阶段：优化器配置（EMA 逻辑）
-    # ------------------------------------------------------------------
-    try:
-        model_config = model.module.config if hasattr(model, 'module') else model.config
-        use_ema = getattr(model_config, 'use_ema_update', False)
-        if use_ema:
-            optimizer_params = [p for p in model.parameters() if p.requires_grad]
-            trainable = sum(p.numel() for p in optimizer_params)
-            total = sum(p.numel() for p in model.parameters())
-            Logger(f"EMA 模式：可训练参数 {trainable:,} / {total:,}", accelerator)
-        else:
-            optimizer_params = model.parameters()
-            Logger("传统模式：所有参数参与优化", accelerator)
-    except Exception as e:
-        Logger(f"警告：无法读取配置({e})，默认所有参数参与优化", accelerator)
-        optimizer_params = model.parameters()
+    # 确保优化器只包含可训练的参数（memory_gate 和 fusion）
+    optimizer_params = [p for p in model.parameters() if p.requires_grad]
+    trainable_count = sum(p.numel() for p in optimizer_params)
+    total_count = sum(p.numel() for p in model.parameters())
+    
+    Logger(f"优化器参数: {trainable_count / 1e6:.3f}M / {total_count / 1e6:.3f}M ({trainable_count / total_count * 100:.2f}%)", accelerator)
+    
+    # 列出可训练的参数名称（用于验证）
+    trainable_param_names = [name for name, param in model.named_parameters() if param.requires_grad]
+    Logger(f"  - 可训练参数模块: {len(trainable_param_names)} 个", accelerator)
+    if len(trainable_param_names) <= 10:
+        for name in trainable_param_names:
+            Logger(f"    * {name}", accelerator)
+    else:
+        Logger(f"    * {trainable_param_names[0]} ... (共{len(trainable_param_names)}个)", accelerator)
 
     optimizer = torch.optim.AdamW(
         optimizer_params,

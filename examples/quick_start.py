@@ -21,17 +21,14 @@ def main():
     print('ExplicitLM 快速开始示例')
     print('='*60)
     
-    # ===== 0. 配置模型路径（请根据实际情况修改） =====
     QWEN3_MODEL_PATH = '/path/to/Qwen3-4b'  # 请替换为实际的Qwen3模型路径
     LLMLINGUA_MODEL_PATH = '/path/to/llmlingua-2-bert'  # 请替换为实际的LLMLingua模型路径
     
-    # ===== 1. 模型配置 =====
     args = {
         'qwen3_model_path': QWEN3_MODEL_PATH,
         'knowledge_num': 1024 * 1024,  # 1048576 个记忆条目
         'knowledge_length': 16,        # 每个条目16个token
         'knowledge_dim': 128,          # 记忆嵌入维度
-        'use_ema_update': False,
         'use_moe': False,
         'num_candidates': 8,
         'num_selected': 1,
@@ -40,7 +37,6 @@ def main():
         'recompute_cache': False,
     }
     
-    # ===== 2. 初始化模型 =====
     print('\n📦 初始化模型...')
     model, tokenizer = init_model(args, accelerator=None)
     model.eval()
@@ -50,11 +46,10 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.pad_token_id = tokenizer.eos_token_id
     
-    print('✅ 模型初始化完成')
+    print('模型初始化完成')
     print(f'  - Memory bank形状: {model.memory_bank.shape if hasattr(model, "memory_bank") else "N/A"}')
     
-    # ===== 3. 初始化双路推理 =====
-    print('\n🔧 初始化双路推理包装器...')
+    print('\n初始化双路推理包装器...')
     
     # 如果需要启用事实提取，需要初始化FactExtractor
     # from utils.fact_extractor import FactExtractor
@@ -71,9 +66,8 @@ def main():
         fact_update_frequency=1,
         update_strategy='fifo',
     )
-    print('✅ 双路推理初始化完成')
+    print('双路推理初始化完成')
     
-    # ===== 4. 测试生成 =====
     test_cases = [
         "什么是人工智能？",
         "请介绍一下机器学习的基本概念。",
@@ -106,12 +100,12 @@ def main():
             print(result['generated_text'])
             
         except Exception as e:
-            print(f'❌ 生成失败: {e}')
+            print(f'错误: 生成失败: {e}')
             import traceback
             traceback.print_exc()
     
     print('\n' + '='*60)
-    print('✅ 测试完成')
+    print('测试完成')
     print('='*60)
 
 

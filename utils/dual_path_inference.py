@@ -69,12 +69,7 @@ class DualPathInference:
         else:
             self.memory_bank_updater = memory_bank_updater
         
-        Logger(f"✅ 双路推理包装器初始化完成")
-        Logger(f"  - 事实提取: {'启用' if enable_fact_extraction else '禁用'}（仅在推理时）")
-        Logger(f"  - 更新频率: 每 {fact_update_frequency} 次推理")
-        Logger(f"  - 更新策略: {update_strategy}")
-        Logger(f"  - 训练模式: 只更新知识融合部分（通过梯度），不更新知识库")
-        Logger(f"  - 推理模式: 提取事实并更新知识库")
+        Logger(f"双路推理包装器初始化完成: 事实提取={'启用' if enable_fact_extraction else '禁用'}, 更新频率={fact_update_frequency}, 策略={update_strategy}")
     
     def generate(
         self,
@@ -102,7 +97,6 @@ class DualPathInference:
                 'memory_update': Dict,  # 记忆库更新结果（如果启用）
             }
         """
-        # ===== 主路：正常推理 =====
         with torch.no_grad():
             generated_ids = self.model.generate(input_ids, **generation_kwargs)
         
@@ -129,7 +123,6 @@ class DualPathInference:
             'generated_text': generated_text,
         }
         
-        # ===== 辅路：事实提取和记忆库更新（仅在推理时） =====
         if self.enable_fact_extraction:
             self.inference_counter += 1
             
@@ -158,10 +151,7 @@ class DualPathInference:
                         compression_rate=self.fact_extractor.compression_rate,
                     )
                     result['memory_update'] = update_result
-                    Logger(
-                        f"📝 记忆库已更新: {update_result.get('updated_count', 0)} 条事实",
-                        accelerator=None
-                    )
+                    Logger(f"记忆库已更新: {update_result.get('updated_count', 0)} 条事实", accelerator=None)
             else:
                 result['fact_extraction'] = {"skipped": True, "reason": "frequency_check"}
                 result['memory_update'] = {"skipped": True, "reason": "frequency_check"}
@@ -190,17 +180,12 @@ class DualPathInference:
                 'model_output': ModelOutput,  # 模型输出
             }
         """
-        # ===== 主路：正常前向传播 =====
-        # 训练时只进行正常的前向传播，知识融合部分通过梯度更新
         model_output = self.model(input_ids, **forward_kwargs)
         
         result = {
             'model_output': model_output,
         }
         
-        # ===== 训练时不进行事实提取和知识库更新 =====
-        # 知识融合部分（MemoryGate, GatedMemoryFusion）会通过梯度自动更新
-        # 知识库更新只在推理时进行
         
         return result
     

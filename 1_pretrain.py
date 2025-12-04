@@ -43,9 +43,6 @@ def to_primitive(cfg):
 
 def main(cfg):
     """cfg 就是 Hydra-Zen 注入的五大配置节点"""
-    # ------------------------------------------------------------------
-    # 1. 解构配置
-    # ------------------------------------------------------------------
     m_cfg  = cfg.model
     d_cfg  = cfg.dataset
     l_cfg  = cfg.logging
@@ -54,9 +51,6 @@ def main(cfg):
     # 补全路径
     m_cfg.cache_path = proj_root / m_cfg.cache_path
     m_cfg.database_init_path = proj_root / m_cfg.database_init_path
-    # ------------------------------------------------------------------
-    # 2. Accelerator + DeepSpeed
-    # ------------------------------------------------------------------
     # 配置 DDP 参数：允许未使用的参数（用于部分模型组件可能不参与梯度计算的情况）
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     ds_plugin = DeepSpeedPlugin(zero_stage=tr_cfg.zero_stage)
@@ -67,9 +61,6 @@ def main(cfg):
     )
     set_seed(tr_cfg.seed + accelerator.process_index)
 
-    # ------------------------------------------------------------------
-    # 3. 目录 & SwanLab
-    # ------------------------------------------------------------------
     if accelerator.is_main_process:
         os.makedirs(l_cfg.out_dir, exist_ok=True)
         os.makedirs(l_cfg.save_dir, exist_ok=True)
@@ -82,11 +73,14 @@ def main(cfg):
         mode = "cloud" if l_cfg.swanlab_online else "offline"
         Logger(f"SwanLab 模式：{mode}", accelerator)
         Logger(f"SwanLab 运行中...", accelerator)
+        # 从环境变量获取API key，如果未设置则使用项目默认值
+        api_key = os.environ.get("SWANLAB_API_KEY", "GtiI1qjU5lco6MKKSrRmN")
         swanlab_run = swanlab.init(
             project=l_cfg.swanlab_project,
             experiment_name=f"ExplicitLM-Pretrain-{tr_cfg.epochs}e-{tr_cfg.batch_size}b",
             config=to_primitive(cfg),  # 使用转换后的配置，处理 Path 对象
-            mode=mode
+            mode=mode,
+            api_key=api_key  # 使用项目特定的API key
         )
 
     # ------------------------------------------------------------------
@@ -95,22 +89,17 @@ def main(cfg):
     # 输出当前目录
     try:
         model, tokenizer = init_model(m_cfg, accelerator)          # 你原来的函数，直接吃 dict
-            # 1. 参数过滤（EMA 逻辑保持原样）
     except Exception as e:
         Logger(f"警告：模型初始化失败({e})，使用默认模型", accelerator)
+    
+    # 参数过滤：只训练 requires_grad=True 的参数
     try:
-        model_config = model.module.config if hasattr(model, 'module') else model.config
-        use_ema = getattr(model_config, 'use_ema_update', False)
-        if use_ema:
-            optimizer_params = [p for p in model.parameters() if p.requires_grad]
-            trainable = sum(p.numel() for p in optimizer_params)
-            total = sum(p.numel() for p in model.parameters())
-            Logger(f"EMA 模式：可训练参数 {trainable:,} / {total:,}", accelerator)
-        else:
-            optimizer_params = model.parameters()
-            Logger("传统模式：所有参数参与优化", accelerator)
+        optimizer_params = [p for p in model.parameters() if p.requires_grad]
+        trainable = sum(p.numel() for p in optimizer_params)
+        total = sum(p.numel() for p in model.parameters())
+        Logger(f"可训练参数: {trainable:,} / {total:,} ({100*trainable/total:.2f}%)", accelerator)
     except Exception as e:
-        Logger(f"警告：无法读取配置({e})，默认所有参数参与优化", accelerator)
+        Logger(f"警告：无法统计参数({e})，使用所有参数", accelerator)
         optimizer_params = model.parameters()
     
     optimizer = torch.optim.AdamW(

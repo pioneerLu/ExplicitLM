@@ -164,13 +164,11 @@ def print_config(config: LMConfig):
     print(f"  knowledge_length: {config.knowledge_length}")
     print(f"  knowledge_dim: {config.knowledge_dim}")
 
-    # EMA更新相关配置
-    print("\n【EMA更新相关配置】")
-    print(f"  use_ema_update: {config.use_ema_update}")
-    print(f"  ema_decay: {config.ema_decay}")
-    print(f"  ema_update_freq: {config.ema_update_freq}")
+    # 记忆更新相关配置
+    print("\n【记忆更新相关配置】")
     print(f"  use_token_memory: {config.use_token_memory}")
     print(f"  freeze_ratio: {config.freeze_ratio}")
+    print("  注意：记忆库在训练时固定，推理时通过 LLMLingua 更新")
 
     # 实验1.4.10相关配置
     print("\n【实验1.4.10: Gumbel-Softmax相关配置】")

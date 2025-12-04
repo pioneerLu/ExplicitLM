@@ -46,11 +46,8 @@ class LMConfig(PretrainedConfig):
             knowledge_length: int = 16,
             knowledge_dim: int = 128,
             ####################################################
-            # EMA更新相关配置（灵感来自VQ-VAE）
+            # 记忆库相关配置
             ####################################################
-            use_ema_update: bool = True,   # 是否使用EMA更新memory_bank
-            ema_decay: float = 0.9,        # 🔥 1.4.6: 进一步降低衰减率，允许更激进更新 (0.999 → 0.8)
-            ema_update_freq: int = 5,      # 🔥 1.4.6: 进一步提高更新频率 (1 → 5)
             use_token_memory: bool = True,  # 🔥 1.4.6: 新增token-based memory flag
             freeze_ratio: float = 0.2,     # 🔥 新增: memory_bank冻结率 (0.0表示不冻结，0.2表示20%条目不更新)
             ####################################################
@@ -134,11 +131,9 @@ class LMConfig(PretrainedConfig):
         self.knowledge_length = knowledge_length
         self.knowledge_dim = knowledge_dim
         ####################################################
-        # EMA更新相关配置（灵感来自VQ-VAE）
+        # 记忆库相关配置
         ####################################################
-        self.use_ema_update = use_ema_update
-        self.ema_decay = ema_decay
-        self.ema_update_freq = ema_update_freq
+        # Memory bank在训练时固定，推理时通过LLMLingua更新
         self.use_token_memory = use_token_memory  # 🔥 1.4.6: token-based memory flag
         self.freeze_ratio = freeze_ratio  # 🔥 新增: memory_bank冻结率
         ####################################################

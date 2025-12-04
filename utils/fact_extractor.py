@@ -11,7 +11,7 @@ try:
     LLMLINGUA_AVAILABLE = True
 except ImportError:
     LLMLINGUA_AVAILABLE = False
-    print("⚠️  llmlingua 未安装，事实提取功能将不可用")
+    print("警告: llmlingua 未安装，事实提取功能将不可用")
 
 
 class FactExtractor:
@@ -55,12 +55,12 @@ class FactExtractor:
                 f"请运行 bert/get_model.py 下载模型"
             )
         
-        print(f"🔤 加载 LLMLingua 模型: {self.model_path}")
+        print(f"加载 LLMLingua 模型: {self.model_path}")
         self.compressor = PromptCompressor(
             model_name=self.model_path,
             use_llmlingua2=True
         )
-        print("✅ LLMLingua 模型加载完成")
+        print("LLMLingua 模型加载完成")
     
     def extract_facts(
         self,
@@ -123,7 +123,7 @@ class FactExtractor:
                 'annotations': annotations,
             }
         except Exception as e:
-            print(f"⚠️  事实提取失败: {e}")
+            print(f"警告: 事实提取失败: {e}")
             # 失败时返回原始文本
             return {
                 'compressed_text': text,

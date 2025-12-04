@@ -19,6 +19,9 @@ MAX_SEQ_LEN=512
 
 # ========== 执行训练 ==========
 
+# 设置SwanLab API Key
+export SWANLAB_API_KEY=GtiI1qjU5lco6MKKSrRmN
+
 cd "$(dirname "$0")/.."
 
 echo "=========================================="

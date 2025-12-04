@@ -408,9 +408,13 @@ class SFTEvalDataset(Dataset):
 
     def _load_data(self, path: str) -> List[Dict[str, Any]]:
         """
-        从JSONL文件加载评估数据
+        从JSONL或JSON文件加载评估数据
 
-        支持两种格式：
+        支持两种文件格式：
+        1. JSONL格式：每行一个JSON对象
+        2. JSON格式：整个文件是一个JSON数组
+
+        支持两种数据格式：
         1. 对话格式：包含 'conversations' 字段
         2. TREX格式：包含 'text' 字段（自动转换为对话格式）
 
@@ -422,10 +426,33 @@ class SFTEvalDataset(Dataset):
         """
         samples = []
         skipped_count = 0
+        
+        # 判断文件格式：根据文件扩展名或尝试解析
+        is_json_array = path.endswith('.json') and not path.endswith('.jsonl')
+        
         with open(path, 'r', encoding='utf-8') as f:
-            for line_num, line in enumerate(f, 1):
+            if is_json_array:
+                # JSON格式：整个文件是一个数组
                 try:
-                    data = json.loads(line.strip())
+                    data_list = json.load(f)
+                    if not isinstance(data_list, list):
+                        print(f"[错误] JSON文件应该包含一个数组，但得到: {type(data_list)}")
+                        return []
+                    lines = data_list
+                except json.JSONDecodeError as e:
+                    print(f"[错误] 无法解析JSON文件: {e}")
+                    return []
+            else:
+                # JSONL格式：每行一个JSON对象
+                lines = f
+        
+            for line_num, line in enumerate(lines, 1):
+                try:
+                    # 如果是JSONL格式，需要解析每一行
+                    if not is_json_array:
+                        data = json.loads(line.strip())
+                    else:
+                        data = line  # JSON格式中，line已经是解析后的对象
                     
                     # 检查是否为TREX格式（包含text字段但不包含conversations）
                     if 'text' in data and 'conversations' not in data:

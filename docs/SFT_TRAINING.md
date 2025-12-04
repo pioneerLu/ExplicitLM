@@ -83,7 +83,6 @@ ModelConf = builds(
     # ... 其他配置 ...
     cache_path="data/cache/knowledge_cache.pt",  # 使用预训练的 cache
     recompute_cache=False,                        # 不重新计算
-    use_ema_update=False,                         # SFT 时通常不使用 EMA
 )
 ```
 

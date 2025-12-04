@@ -1,10 +1,7 @@
 """
 Qwen3ExplicitLMBlock: 基于Qwen3DecoderLayer的记忆增强Transformer块
 
-该模块在Qwen3DecoderLayer的基础上添加了ExplicitLM的记忆库机制：
-- 复用Qwen3的标准Attention和MLP
-- 在MLP输出后添加记忆检索和融合机制
-- 保持与ExplicitLMBlock相同的接口和损失计算
+在Qwen3DecoderLayer基础上添加记忆检索和融合机制。
 """
 
 from typing import Dict, Tuple, Union, Optional
@@ -25,24 +22,14 @@ from models.layers.RMSNorm import RMSNorm
 
 
 class Qwen3ExplicitLMBlock(nn.Module):
-    """
-    基于Qwen3DecoderLayer的记忆增强Transformer块
-    
-    该模块实现了以下核心功能：
-    1. 复用Qwen3的标准Attention和MLP
-    2. 在MLP输出后添加记忆检索机制
-    3. Gumbel-Softmax进行可微分的离散选择
-    4. 计算相似度损失和多样性损失以优化记忆选择
-    """
+    """基于Qwen3DecoderLayer的记忆增强Transformer块"""
 
     def __init__(self, config: Qwen3Config, layer_idx: int, memory_cfg: dict) -> None:
         """
-        初始化Qwen3ExplicitLMBlock
-
         Args:
             config: Qwen3Config配置对象
             layer_idx: 当前层的ID索引
-            memory_cfg: 记忆库相关配置字典，包含knowledge_num, knowledge_dim等
+            memory_cfg: 记忆库相关配置字典
         """
         super().__init__()
         self.config = config
@@ -50,23 +37,16 @@ class Qwen3ExplicitLMBlock(nn.Module):
         self.memory_cfg = memory_cfg
         self.hidden_size = config.hidden_size
         
-        # 复用Qwen3DecoderLayer的核心组件
         self.qwen3_decoder = Qwen3DecoderLayer(config, layer_idx)
         
-        # 记忆相关模块（仅在非MOE模式下使用）
         use_moe = memory_cfg.get("use_moe", False)
         if not use_moe:
-            # 记忆查询归一化层
             self.memory_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             
-            # 记忆门控和融合模块
-            # 需要将Qwen3的hidden_size映射到memory_cfg的dim
             memory_cfg_with_dim = memory_cfg.copy()
-            memory_cfg_with_dim["dim"] = config.hidden_size  # 使用Qwen3的hidden_size
+            memory_cfg_with_dim["dim"] = config.hidden_size
             self.memory_gate = MemoryGate(memory_cfg_with_dim)
             self.gated_memory_fusion = GatedMemoryFusion(memory_cfg_with_dim)
-            
-            # Gumbel-Softmax参数
             self.gumbel_temperature = memory_cfg.get("gumbel_temperature", 1.0)
         else:
             self.memory_norm = None
@@ -116,30 +96,18 @@ class Qwen3ExplicitLMBlock(nn.Module):
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         memory_bank: Optional[torch.Tensor] = None,
         tok_embeddings: Optional[nn.Embedding] = None,
-        collect_ema_stats: bool = False,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> Union[
-        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, float], Dict[str, Union[torch.Tensor, float]]],
-        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, float], Dict[str, Union[torch.Tensor, float]], Dict[str, Union[torch.Tensor, float]]],
-    ]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, float], Dict[str, Union[torch.Tensor, float]]]:
         """
-        前向传播
-        
         Args:
             hidden_states: 输入隐藏状态
-            memory_bank: 记忆库，形状为 [knowledge_num, knowledge_length]
-            tok_embeddings: token嵌入层，用于解码记忆库中的token
-            collect_ema_stats: 是否收集EMA统计信息
-            其他参数：Qwen3DecoderLayer的标准参数
-        
+            memory_bank: 记忆库 [knowledge_num, knowledge_length]
+            tok_embeddings: token嵌入层
         Returns:
-            如果collect_ema_stats=True: (output, sim_loss, div_loss, layer_stats, ema_stats, cosine_stats)
-            否则: (output, sim_loss, div_loss, layer_stats, cosine_stats)
+            (output, sim_loss, div_loss, layer_stats, cosine_stats)
         """
         use_moe = self.memory_cfg.get("use_moe", False)
         
-        # ===== 第一阶段：Qwen3标准流程 =====
-        # 通过Qwen3DecoderLayer处理（Attention + MLP）
         hidden_states = self.qwen3_decoder(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -152,73 +120,59 @@ class Qwen3ExplicitLMBlock(nn.Module):
         )
         
         if use_moe:
-            # MOE模式：不需要记忆库机制
             similarity_loss = torch.tensor(0.0, device=hidden_states.device)
             diversity_loss = torch.tensor(0.0, device=hidden_states.device)
             layer_stats = {}
             cosine_stats = {}
-            ema_stats = None
-            
-            if collect_ema_stats:
-                return hidden_states, similarity_loss, diversity_loss, layer_stats, ema_stats, cosine_stats
-            else:
-                return hidden_states, similarity_loss, diversity_loss, layer_stats, cosine_stats
+            return hidden_states, similarity_loss, diversity_loss, layer_stats, cosine_stats
         else:
-            # ===== 第二阶段：记忆库模式 =====
-            # 准备记忆查询
             h_for_memory = self.memory_norm(hidden_states)
-            
-            # ===== 第三阶段：候选记忆生成 =====
             candidate_indices, _candidate_scores = self.memory_gate(h_for_memory)
             bsz, seq_len, num_candidates = candidate_indices.shape
             
-            # ===== 第四阶段：候选记忆解码 =====
-            # 优化内存：分批处理候选记忆，避免一次性处理所有候选
             candidate_indices_flat = candidate_indices.view(-1)
-            candidate_token_ids = memory_bank[candidate_indices_flat]  # [bsz*seq_len*num_candidates, knowledge_length]
+            candidate_token_ids = memory_bank[candidate_indices_flat]
             
-            # 分批处理embedding，避免OOM（减小批次大小以适应显存）
-            batch_size_embed = 2048  # 每批处理的候选数量
+            batch_size_embed = 128
             num_total_candidates = candidate_token_ids.shape[0]
             candidate_embeddings_list = []
             
             for i in range(0, num_total_candidates, batch_size_embed):
                 end_idx = min(i + batch_size_embed, num_total_candidates)
                 batch_token_ids = candidate_token_ids[i:end_idx]
-                batch_embeddings = tok_embeddings(batch_token_ids)  # [batch_size, knowledge_length, hidden_size]
-                batch_memories = batch_embeddings.mean(dim=1)  # [batch_size, hidden_size]
+                batch_embeddings = tok_embeddings(batch_token_ids)
+                batch_memories = batch_embeddings.mean(dim=1)
                 candidate_embeddings_list.append(batch_memories)
-                # 及时释放中间变量
                 del batch_embeddings, batch_token_ids
+                if (i // batch_size_embed) % 2 == 0:
+                    torch.cuda.empty_cache()
             
-            # 合并所有批次的记忆
-            candidate_memories_flat = torch.cat(candidate_embeddings_list, dim=0)  # [bsz*seq_len*num_candidates, hidden_size]
+            candidate_memories_flat = torch.cat(candidate_embeddings_list, dim=0)
             candidate_memories = candidate_memories_flat.view(bsz, seq_len, num_candidates, self.hidden_size)
-            # 释放中间变量
             del candidate_embeddings_list, candidate_memories_flat, candidate_token_ids, candidate_indices_flat
             
-            # ===== 第五阶段：相似度计算 =====
-            h_expanded = h_for_memory.unsqueeze(2).expand(-1, -1, num_candidates, -1)
+            h_for_memory_expanded = h_for_memory.unsqueeze(2)
+            h_expanded = h_for_memory_expanded.expand_as(candidate_memories)
             similarity_scores = F.cosine_similarity(h_expanded, candidate_memories, dim=-1)
+            del h_expanded, h_for_memory_expanded
             
-            # ===== 第六阶段：Gumbel-Softmax选择 =====
             selection_weights, selected_indices = self.gumbel_softmax_selection(
                 similarity_scores, temperature=self.gumbel_temperature, hard=True
             )
             
-            # ===== 第七阶段：损失计算 =====
             selected_similarities = (similarity_scores * selection_weights).sum(dim=-1)
             similarity_loss = -selected_similarities.mean()
             diversity_loss = self.compute_diversity_loss(candidate_memories)
             
-            # ===== 第八阶段：记忆融合 =====
             selected_memory = (candidate_memories * selection_weights.unsqueeze(-1)).sum(dim=2)
-            memory_output = self.gated_memory_fusion(h_for_memory, selected_memory)
+            memory_output = self.gated_memory_fusion(
+                h_for_memory, 
+                selected_memory,
+                similarity_scores=selected_similarities
+            )
             
-            # ===== 第九阶段：输出生成 =====
             out = hidden_states + memory_output
             
-            # ===== 第十阶段：统计信息收集 =====
             layer_stats = self._compute_selection_stats(candidate_indices, selection_weights)
             cosine_stats = {
                 "similarity_scores": similarity_scores,
@@ -232,20 +186,7 @@ class Qwen3ExplicitLMBlock(nn.Module):
                 ).mean().item(),
             }
             
-            ema_stats = None
-            if collect_ema_stats and self.training:
-                selected_memory_indices = candidate_indices.gather(2, selected_indices.unsqueeze(-1))
-                ema_stats = {
-                    "memory_indices": selected_memory_indices,
-                    "memory_scores": torch.ones_like(selected_memory_indices.float()),
-                    "h_for_memory": h_for_memory,
-                    "selected_memory": selected_memory.unsqueeze(2),
-                }
-            
-            if collect_ema_stats:
-                return out, similarity_loss, diversity_loss, layer_stats, ema_stats, cosine_stats
-            else:
-                return out, similarity_loss, diversity_loss, layer_stats, cosine_stats
+            return out, similarity_loss, diversity_loss, layer_stats, cosine_stats
 
     def _compute_selection_stats(
         self,

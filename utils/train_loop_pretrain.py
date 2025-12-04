@@ -142,23 +142,7 @@ def train_epoch(
         optimizer.step()
         optimizer.zero_grad()
 
-        # VQ-VAE风格的EMA更新（仅在启用时执行）
-        if hasattr(res, 'ema_stats') and res.ema_stats is not None:
-            unwrapped_model = accelerator.unwrap_model(model)
-            if hasattr(unwrapped_model, 'apply_ema_update'):
-                ema_update_stats = unwrapped_model.apply_ema_update(res.ema_stats)
-
-                # 记录EMA更新统计信息
-                if (current_step + 1) % args.logging.log_interval == 0 and accelerator.is_main_process:
-                    if ema_update_stats.get('ema_update_applied', False):
-                        total_memories = args.model.knowledge_num
-                        Logger(
-                            f"EMA更新 - Step: {ema_update_stats['ema_step']}, "
-                            f"更新记忆数: {ema_update_stats['updated_memories']}/{total_memories} "
-                            f"({ema_update_stats['update_ratio']:.4f}), "
-                            f"覆盖率: {ema_update_stats['selected_memory_coverage']:.4f}",
-                            accelerator
-                        )
+        # Memory bank在训练时固定，推理时通过LLMLingua更新，不再需要EMA更新
 
         # ============================================================
         # [新增] 机制1：每 500 个 Global Step 保存一次完整 Checkpoint (用于续训)

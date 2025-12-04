@@ -75,10 +75,7 @@ class MemoryBankUpdater:
         # 初始化重要性评分（用于 importance 策略）
         self.importance_scores = torch.ones(self.knowledge_num, dtype=torch.float32)
         
-        Logger(f"✅ 记忆库更新器初始化完成")
-        Logger(f"  - 更新策略: {update_strategy}")
-        Logger(f"  - 最大条目数: {self.max_entries}")
-        Logger(f"  - 知识库大小: {self.knowledge_num} x {self.knowledge_length}")
+        Logger(f"记忆库更新器初始化完成: 策略={update_strategy}, 大小={self.knowledge_num}x{self.knowledge_length}")
     
     def update_with_facts(
         self,
