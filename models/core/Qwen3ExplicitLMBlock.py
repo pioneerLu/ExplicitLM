@@ -127,10 +127,37 @@ class Qwen3ExplicitLMBlock(nn.Module):
             return hidden_states, similarity_loss, diversity_loss, layer_stats, cosine_stats
         else:
             h_for_memory = self.memory_norm(hidden_states)
-            candidate_indices, _candidate_scores = self.memory_gate(h_for_memory)
-            bsz, seq_len, num_candidates = candidate_indices.shape
             
-            candidate_indices_flat = candidate_indices.view(-1)
+            # Mean Pooling
+            if attention_mask is not None:
+                # Expand mask to [batch, seq, dim]
+                input_mask_expanded = attention_mask.unsqueeze(-1).expand(h_for_memory.size()).float()
+                
+                # Average embeddings
+                sum_embeddings = torch.sum(h_for_memory * input_mask_expanded, 1)
+                
+                sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+                
+                mean_embeddings = sum_embeddings / sum_mask  # [batch, dim]
+            else:
+                # Fallback if no mask provided
+                mean_embeddings = h_for_memory.mean(dim=1)  # [batch, dim]
+            
+            # Reshape to [batch, 1, dim] for MemoryGate
+            query_embeddings = mean_embeddings.unsqueeze(1)  # [batch, 1, dim]
+            
+            # 使用新的两阶段检索机制：先计算子分数，再生成候选
+            scores_1, scores_2 = self.memory_gate.compute_sub_scores(query_embeddings)
+            candidate_indices, candidate_scores = self.memory_gate.generate_candidates(scores_1, scores_2)
+            bsz, _, num_candidates = candidate_indices.shape
+            seq_len = h_for_memory.shape[1]
+            
+            # candidate_indices: [batch, 1, num_candidates] -> [batch, seq_len, num_candidates]
+            # candidate_scores: [batch, 1, num_candidates] -> [batch, seq_len, num_candidates]
+            candidate_indices = candidate_indices.expand(bsz, seq_len, num_candidates)
+            candidate_scores = candidate_scores.expand(bsz, seq_len, num_candidates)
+            
+            candidate_indices_flat = candidate_indices.reshape(-1)
             candidate_token_ids = memory_bank[candidate_indices_flat]
             
             batch_size_embed = 128
@@ -141,6 +168,7 @@ class Qwen3ExplicitLMBlock(nn.Module):
                 end_idx = min(i + batch_size_embed, num_total_candidates)
                 batch_token_ids = candidate_token_ids[i:end_idx]
                 batch_embeddings = tok_embeddings(batch_token_ids)
+                
                 batch_memories = batch_embeddings.mean(dim=1)
                 candidate_embeddings_list.append(batch_memories)
                 del batch_embeddings, batch_token_ids
@@ -148,7 +176,7 @@ class Qwen3ExplicitLMBlock(nn.Module):
                     torch.cuda.empty_cache()
             
             candidate_memories_flat = torch.cat(candidate_embeddings_list, dim=0)
-            candidate_memories = candidate_memories_flat.view(bsz, seq_len, num_candidates, self.hidden_size)
+            candidate_memories = candidate_memories_flat.reshape(bsz, seq_len, num_candidates, self.hidden_size)
             del candidate_embeddings_list, candidate_memories_flat, candidate_token_ids, candidate_indices_flat
             
             h_for_memory_expanded = h_for_memory.unsqueeze(2)
@@ -195,8 +223,8 @@ class Qwen3ExplicitLMBlock(nn.Module):
     ) -> Dict[str, float]:
         """计算选择统计信息"""
         device = candidate_indices.device
-        flat_indices = candidate_indices.view(-1)
-        flat_weights = selection_weights.view(-1)
+        flat_indices = candidate_indices.reshape(-1)
+        flat_weights = selection_weights.reshape(-1)
         knowledge_num = self.memory_cfg["knowledge_num"]
         # 确保memory_counts和flat_weights的数据类型一致（用于scatter_add）
         memory_counts = torch.zeros(knowledge_num, device=device, dtype=flat_weights.dtype)
