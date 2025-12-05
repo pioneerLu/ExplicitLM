@@ -21,12 +21,33 @@ from accelerate import Accelerator
 from tqdm import tqdm
 import swanlab
 
-from experiments.dnn_cosine_sim.model import QwenMemoryRouter
+# 设置进程名称（在 nvidia-smi 中显示的名称）
+try:
+    import setproctitle
+    process_name = os.environ.get('PYTHON_PROCESS_NAME', 'llama-env')
+    setproctitle.setproctitle(process_name)
+except ImportError:
+    # 如果没有 setproctitle，尝试使用 prctl (Linux only)
+    try:
+        import prctl
+        process_name = os.environ.get('PYTHON_PROCESS_NAME', 'llama-env')
+        prctl.set_name(process_name.encode('utf-8'))
+    except (ImportError, AttributeError):
+        # 如果都不可用，跳过（不影响训练）
+        pass
+
+# 尝试加载 .env 文件
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv 未安装时忽略
+
+from experiments.dnn_similarity.model import QwenMemoryRouter
 
 class RouterDataset(Dataset):
     def __init__(self, data_path, tokenizer, max_length=512):
         self.data = []
-        print(f"Loading data from {data_path}...")
         with open(data_path, 'r') as f:
             for line in f:
                 self.data.append(json.loads(line))
@@ -34,15 +55,20 @@ class RouterDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = max_length
         
+        if len(self.data) > 0:
+            sample = self.data[0]
+            if 'query' not in sample or 'target_indices' not in sample:
+                raise ValueError(f"Expected 'query' format with 'target_indices' field, got keys: {sample.keys()}")
+        
     def __len__(self):
         return len(self.data)
     
     def __getitem__(self, idx):
         item = self.data[idx]
         query = item['query']
-        target_indices = item['target_indices'] # List of ints
+        target_indices = item['target_indices']
+        target_scores = item.get('target_scores', [1.0] * len(target_indices))
         
-        # Tokenize query
         encodings = self.tokenizer(
             query,
             max_length=self.max_length,
@@ -55,19 +81,10 @@ class RouterDataset(Dataset):
             "input_ids": encodings.input_ids.squeeze(0),
             "attention_mask": encodings.attention_mask.squeeze(0),
             "target_indices": torch.tensor(target_indices, dtype=torch.long),
-            "target_scores": torch.tensor(item['target_scores'], dtype=torch.float)
+            "target_scores": torch.tensor(target_scores, dtype=torch.float)
         }
 
 def calculate_metrics(pred_indices, target_indices, target_scores=None):
-    """
-    Calculate Recall@K, Hit Rate, and Soft Recall
-    pred_indices: [batch, k_pred]
-    target_indices: [batch, k_target]
-    target_scores: [batch, k_target] (Optional, for Soft Recall)
-    
-    Returns:
-        dict with raw sums and counts for accumulation
-    """
     batch_size = pred_indices.size(0)
     recall_sum = 0
     soft_recall_sum = 0
@@ -92,18 +109,10 @@ def calculate_metrics(pred_indices, target_indices, target_scores=None):
         hit_sum += 1 if num_correct > 0 else 0
         
         if target_scores is not None:
-            # Calculate Soft Recall
-            # Sum of scores of retrieved targets / Sum of all target scores
             total_target_score = target_scores_cpu[i].sum()
-            
-            # Find scores of retrieved targets
             retrieved_score = 0
-            # We need to map target index to its score. 
-            # Since target_indices and target_scores are aligned:
             t_indices = target_indices_cpu[i]
             t_scores = target_scores_cpu[i]
-            
-            # Create a lookup for this sample
             target_score_map = {idx: score for idx, score in zip(t_indices, t_scores)}
             
             for pred_idx in preds:
@@ -123,59 +132,63 @@ def calculate_metrics(pred_indices, target_indices, target_scores=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_path", type=str, default="experiments/dnn_cosine_sim/train_with_labels.jsonl")
-    parser.add_argument("--model_name", type=str, default="/home/pci/ycz/Code/ExplicitLM/Qwen")
-    parser.add_argument("--output_dir", type=str, default="experiments/dnn_cosine_sim/checkpoints")
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--data_path", type=str, default="data/train_labeled.jsonl", help="训练数据路径（query格式，需包含target_indices和target_scores）")
+    parser.add_argument("--model_name", type=str, default="/data2/zengzheni/lvchangwei/new_repo/Qwen/models/Qwen3-4b", help="Qwen3 模型路径")
+    parser.add_argument("--output_dir", type=str, default="checkpoints/router", help="输出目录")
+    parser.add_argument("--batch_size", type=int, default=4, help="Batch size (默认 4，可根据 GPU 内存调整)")
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--knowledge_num", type=int, default=1024*1024, help="Total number of items in knowledge base")
+    parser.add_argument("--knowledge_num", type=int, default=65536, help="Total number of items in knowledge base（需为完全平方数）")
     parser.add_argument("--knowledge_dim", type=int, default=2048)
     parser.add_argument("--num_candidates", type=int, default=32)
     parser.add_argument("--max_length", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=0.5, help="Temperature for soft label loss")
-    parser.add_argument("--swanlab_project", type=str, default="dnn-cosine-sim")
+    parser.add_argument("--swanlab_project", type=str, default="explicitlm-router")
+    parser.add_argument("--swanlab_api_key", type=str, default='dKWI69mdEndjB2P9YdY8f', help="SwanLab API Key（也可通过环境变量 SWANLAB_API_KEY 设置）")
+    parser.add_argument("--gpu_id", type=str, default="5,6")
     
     args = parser.parse_args()
+    
+    if torch.cuda.is_available():
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
+    
+    if args.swanlab_api_key:
+        os.environ["SWANLAB_API_KEY"] = args.swanlab_api_key
     
     accelerator = Accelerator()
     if accelerator.is_main_process:
         swanlab.init(project=args.swanlab_project, config=vars(args))
     
-    # Load Metadata from prepare_data.py
     meta_path = os.path.join(os.path.dirname(args.data_path), "meta.json")
     if os.path.exists(meta_path):
-        print(f"Loading metadata from {meta_path}...")
         with open(meta_path, 'r') as f:
             meta = json.load(f)
             knowledge_num = meta.get("knowledge_num", args.knowledge_num)
             knowledge_dim = meta.get("embedding_dim", args.knowledge_dim)
             keys_path = meta.get("keys_path", None)
-            print(f"Using knowledge_num={knowledge_num}, knowledge_dim={knowledge_dim}, keys_path={keys_path}")
     else:
-        print("Warning: meta.json not found. Using arguments.")
         knowledge_num = args.knowledge_num
         knowledge_dim = args.knowledge_dim
         keys_path = None
 
-    # Calculate perfect square for knowledge_num
-    # MemoryGate requires knowledge_num to be a perfect square
     sqrt_num = math.ceil(math.sqrt(knowledge_num))
     padded_knowledge_num = sqrt_num ** 2
     if padded_knowledge_num != knowledge_num:
-        accelerator.print(f"Padding knowledge_num from {knowledge_num} to {padded_knowledge_num} (square of {sqrt_num})")
-    
-    # Load Tokenizer
+        accelerator.print(f"Padding knowledge_num from {knowledge_num} to {padded_knowledge_num}")
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         
-    # Load Dataset
-    dataset = RouterDataset(args.data_path, tokenizer, args.max_length)
+    dataset = RouterDataset(
+        args.data_path, 
+        tokenizer, 
+        args.max_length
+    )
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
     
-    # Load Model Config to get dim
+    accelerator.print(f"Dataset loaded: {len(dataset)} samples")
+    
     config = AutoConfig.from_pretrained(args.model_name, trust_remote_code=True)
     hidden_size = config.hidden_size
     
@@ -190,26 +203,19 @@ def main():
     
     model = QwenMemoryRouter(args.model_name, memory_gate_cfg, freeze_backbone=True)
     
-    # Optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    
-    # Scheduler
     num_training_steps = args.epochs * len(dataloader)
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=100, num_training_steps=num_training_steps
     )
     
-    # Prepare
     model, optimizer, dataloader, scheduler = accelerator.prepare(
         model, optimizer, dataloader, scheduler
     )
-    
-    # Train
     global_step = 0
     for epoch in range(args.epochs):
         model.train()
         
-        # Epoch metric accumulators
         epoch_loss_sum = 0.0
         epoch_recall_sum = 0.0
         epoch_soft_recall_sum = 0.0
@@ -217,12 +223,10 @@ def main():
         epoch_correct_count_sum = 0.0
         epoch_total_samples = 0
         epoch_total_candidates = 0
-        
         steps_in_epoch = 0
         
         for batch in tqdm(dataloader, disable=not accelerator.is_local_main_process):
             with accelerator.accumulate(model):
-                # Forward pass returns loss and predicted indices
                 loss, pred_indices = model(
                     input_ids=batch["input_ids"],
                     attention_mask=batch["attention_mask"],
@@ -236,18 +240,11 @@ def main():
                 scheduler.step()
                 optimizer.zero_grad()
                 
-                # Accumulate metrics
-                # pred_indices: [batch, 1, k_pred] -> [batch, k_pred]
                 batch_metrics = calculate_metrics(
                     pred_indices.squeeze(1), 
                     batch["target_indices"],
                     batch["target_scores"]
                 )
-                
-                # Sync metrics across devices for accurate logging if distributed
-                # For simplicity, we'll compute local metrics and average them if needed, 
-                # but standard practice is to just log main process or all-reduce. 
-                # Here we stick to local accumulation and assume dataloader is sharded properly.
                 
                 epoch_loss_sum += loss.item()
                 epoch_recall_sum += batch_metrics["recall_sum"]
@@ -258,30 +255,24 @@ def main():
                 epoch_total_candidates += batch_metrics["total_candidates"]
                 steps_in_epoch += 1
                 
-                # Log running average metrics
-                if global_step % 10 == 0:
-                     if accelerator.is_main_process:
-                         # Calculate running averages
-                         running_avg_loss = epoch_loss_sum / steps_in_epoch
-                         running_avg_recall = epoch_recall_sum / epoch_total_samples if epoch_total_samples > 0 else 0
-                         running_avg_soft_recall = epoch_soft_recall_sum / epoch_total_samples if epoch_total_samples > 0 else 0
-                         running_avg_hit_rate = epoch_hit_sum / epoch_total_samples if epoch_total_samples > 0 else 0
-                         
-                         swanlab.log({
-                             "train/step_loss": loss.item(),
-                             "train/running_avg_loss": running_avg_loss,
-                             "train/running_avg_recall": running_avg_recall,
-                             "train/running_avg_soft_recall": running_avg_soft_recall,
-                             "train/running_avg_hit_rate": running_avg_hit_rate,
-                             "lr": scheduler.get_last_lr()[0]
-                         }, step=global_step)
-                         
-                         print(f"Step {global_step}: Loss {loss.item():.4f} | Avg Loss {running_avg_loss:.4f} | Avg Recall {running_avg_recall:.4f} | Avg SoftRecall {running_avg_soft_recall:.4f} | Avg HitRate {running_avg_hit_rate:.4f}")
+                if global_step % 10 == 0 and accelerator.is_main_process:
+                    running_avg_loss = epoch_loss_sum / steps_in_epoch
+                    running_avg_recall = epoch_recall_sum / epoch_total_samples if epoch_total_samples > 0 else 0
+                    running_avg_soft_recall = epoch_soft_recall_sum / epoch_total_samples if epoch_total_samples > 0 else 0
+                    running_avg_hit_rate = epoch_hit_sum / epoch_total_samples if epoch_total_samples > 0 else 0
+                    
+                    swanlab.log({
+                        "train/step_loss": loss.item(),
+                        "train/running_avg_loss": running_avg_loss,
+                        "train/running_avg_recall": running_avg_recall,
+                        "train/running_avg_soft_recall": running_avg_soft_recall,
+                        "train/running_avg_hit_rate": running_avg_hit_rate,
+                        "lr": scheduler.get_last_lr()[0]
+                    }, step=global_step)
                 
                 global_step += 1
         
-        # Calculate and log epoch metrics
-        avg_loss = epoch_loss_sum / len(dataloader) # Approximation since batch size varies, but close enough
+        avg_loss = epoch_loss_sum / len(dataloader)
         avg_recall = epoch_recall_sum / epoch_total_samples if epoch_total_samples > 0 else 0
         avg_soft_recall = epoch_soft_recall_sum / epoch_total_samples if epoch_total_samples > 0 else 0
         avg_hit_rate = epoch_hit_sum / epoch_total_samples if epoch_total_samples > 0 else 0
@@ -289,13 +280,7 @@ def main():
         precision = epoch_correct_count_sum / epoch_total_candidates if epoch_total_candidates > 0 else 0
         
         if accelerator.is_main_process:
-            print(f"Epoch {epoch} finished.")
-            print(f"Avg Loss: {avg_loss:.4f}")
-            print(f"Recall: {avg_recall:.4f}")
-            print(f"Soft Recall: {avg_soft_recall:.4f}")
-            print(f"Hit Rate: {avg_hit_rate:.4f}")
-            print(f"Avg Correct: {avg_correct:.4f}")
-            print(f"Precision: {precision:.4f}")
+            accelerator.print(f"Epoch {epoch}: Loss={avg_loss:.4f}, Recall={avg_recall:.4f}, HitRate={avg_hit_rate:.4f}")
             
             swanlab.log({
                 "train/epoch_loss": avg_loss,
@@ -305,13 +290,18 @@ def main():
                 "train/epoch_avg_correct": avg_correct,
                 "train/epoch_precision": precision
             }, step=global_step)
-        
-        # Save checkpoint
-        if accelerator.is_main_process:
+            
             save_path = os.path.join(args.output_dir, f"epoch_{epoch}")
             os.makedirs(save_path, exist_ok=True)
             accelerator.save_state(save_path)
-            print(f"Saved checkpoint to {save_path}")
+            
+            unwrapped_model = accelerator.unwrap_model(model)
+            memory_gate_state = {}
+            for k, v in unwrapped_model.head.state_dict().items():
+                memory_gate_state[k] = v.cpu()
+            
+            memory_gate_path = os.path.join(args.output_dir, f"memory_gate_epoch_{epoch}.pth")
+            torch.save(memory_gate_state, memory_gate_path)
 
     accelerator.end_training()
     if accelerator.is_main_process:

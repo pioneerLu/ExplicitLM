@@ -433,6 +433,63 @@ def _init_qwen3_model(args: dict, accelerator=None):
     return model, tokenizer
 
 
+def load_pretrained_memory_gate(model: nn.Module, memory_gate_path: str, accelerator=None):
+    """
+    加载预训练的 MemoryGate 权重到 ExplicitLM 的所有层
+    
+    Args:
+        model: ExplicitLM 模型实例
+        memory_gate_path: MemoryGate 权重文件路径
+        accelerator: Accelerator 实例（可选，用于日志）
+    """
+    if accelerator is None:
+        from utils.logger import Logger
+        Logger = lambda msg, acc: print(msg)
+    
+    Logger(f"加载预训练 MemoryGate 权重: {memory_gate_path}", accelerator)
+    
+    if not os.path.exists(memory_gate_path):
+        raise FileNotFoundError(f"MemoryGate 权重文件不存在: {memory_gate_path}")
+    
+    # 加载权重
+    memory_gate_state = torch.load(memory_gate_path, map_location='cpu')
+    
+    # 统计加载情况
+    loaded_layers = 0
+    total_params = 0
+    missing_keys = []
+    unexpected_keys = []
+    
+    # 遍历所有层，加载 MemoryGate 权重
+    for layer_idx, layer in enumerate(model.layers):
+        if hasattr(layer, 'memory_gate') and layer.memory_gate is not None:
+            try:
+                # 尝试加载权重
+                missing, unexpected = layer.memory_gate.load_state_dict(memory_gate_state, strict=False)
+                
+                if missing:
+                    missing_keys.extend([f"layer_{layer_idx}.{k}" for k in missing])
+                if unexpected:
+                    unexpected_keys.extend([f"layer_{layer_idx}.{k}" for k in unexpected])
+                
+                loaded_layers += 1
+                total_params += sum(p.numel() for p in layer.memory_gate.parameters())
+            except Exception as e:
+                Logger(f"警告: 层 {layer_idx} 加载 MemoryGate 失败: {e}", accelerator)
+    
+    if loaded_layers == 0:
+        raise ValueError("未找到任何 MemoryGate 模块，请检查模型结构")
+    
+    Logger(f"✓ MemoryGate 加载完成: {loaded_layers} 层, {total_params / 1e6:.3f}M 参数", accelerator)
+    
+    if missing_keys:
+        Logger(f"警告: {len(missing_keys)} 个参数未找到（前5个）: {missing_keys[:5]}", accelerator)
+    if unexpected_keys:
+        Logger(f"警告: {len(unexpected_keys)} 个意外参数（前5个）: {unexpected_keys[:5]}", accelerator)
+    
+    return loaded_layers
+
+
 def _initialize_database(
     model: nn.Module,
     tokenizer: AutoTokenizer,

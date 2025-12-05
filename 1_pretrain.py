@@ -6,6 +6,22 @@ import os
 import json
 import time
 import gc
+
+# 设置进程名称（在 nvidia-smi 中显示的名称）
+try:
+    import setproctitle
+    process_name = os.environ.get('PYTHON_PROCESS_NAME', 'llama-env')
+    setproctitle.setproctitle(process_name)
+except ImportError:
+    # 如果没有 setproctitle，尝试使用 prctl (Linux only)
+    try:
+        import prctl
+        process_name = os.environ.get('PYTHON_PROCESS_NAME', 'llama-env')
+        prctl.set_name(process_name.encode('utf-8'))
+    except (ImportError, AttributeError):
+        # 如果都不可用，跳过（不影响训练）
+        pass
+
 from accelerate import Accelerator, DistributedDataParallelKwargs, DeepSpeedPlugin
 from accelerate.utils import set_seed
 import torch

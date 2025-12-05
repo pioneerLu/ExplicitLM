@@ -8,6 +8,7 @@ from typing import Dict, Tuple, Union, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import logging
 from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3DecoderLayer,
     Qwen3Config,
@@ -19,6 +20,8 @@ from typing import Unpack
 from models.memory_bank.MemoryGate import MemoryGate
 from models.memory_bank.GatedMemoryFusion import GatedMemoryFusion
 from models.layers.RMSNorm import RMSNorm
+
+logger = logging.getLogger(__name__)
 
 
 class Qwen3ExplicitLMBlock(nn.Module):
@@ -128,39 +131,62 @@ class Qwen3ExplicitLMBlock(nn.Module):
         else:
             h_for_memory = self.memory_norm(hidden_states)
             
-            # Mean Pooling
             if attention_mask is not None:
-                # Expand mask to [batch, seq, dim]
-                input_mask_expanded = attention_mask.unsqueeze(-1).expand(h_for_memory.size()).float()
-                
-                # Average embeddings
+                ## 这个地方数据定下来后要改一下，我不确定数据最后传进来是什么形状，就先这么写了
+                if attention_mask.dim() == 5:
+                    bsz, _, seq_len, _, _ = attention_mask.shape
+                    causal_matrix = attention_mask[:, 0, :, :, 0]
+                    diag_indices = torch.arange(seq_len, device=causal_matrix.device)
+                    seq_mask = causal_matrix[:, diag_indices, diag_indices].float()
+                elif attention_mask.dim() == 4:
+                    bsz = attention_mask.shape[0]
+                    seq_len = attention_mask.shape[-1]
+                    causal_matrix = attention_mask[:, 0, :, :]
+                    diag_indices = torch.arange(seq_len, device=causal_matrix.device)
+                    seq_mask = causal_matrix[:, diag_indices, diag_indices].float()
+                elif attention_mask.dim() == 2:
+                    seq_mask = attention_mask.float()
+                else:
+                    seq_mask = attention_mask.squeeze().float()
+                    if seq_mask.dim() == 2 and seq_mask.shape[0] == seq_mask.shape[1]:
+                        bsz = 1 if seq_mask.shape[0] == seq_mask.shape[1] else seq_mask.shape[0]
+                        seq_len = seq_mask.shape[-1]
+                        diag_indices = torch.arange(seq_len, device=seq_mask.device)
+                        seq_mask = seq_mask[diag_indices, diag_indices].unsqueeze(0).float()
+                    else:
+                        while seq_mask.dim() > 2:
+                            if seq_mask.shape[1] == 1:
+                                seq_mask = seq_mask[:, 0]
+                            else:
+                                seq_mask = seq_mask[..., 0]
+                        if seq_mask.dim() == 1:
+                            seq_mask = seq_mask.unsqueeze(0)
+                ### 到这里结束
+
+                ## 均值embd，可以确认一下这里
+                seq_mask = seq_mask.to(dtype=h_for_memory.dtype)
+                input_mask_expanded = seq_mask.unsqueeze(-1).expand(h_for_memory.size())
                 sum_embeddings = torch.sum(h_for_memory * input_mask_expanded, 1)
-                
                 sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
-                
-                mean_embeddings = sum_embeddings / sum_mask  # [batch, dim]
+                mean_embeddings = sum_embeddings / sum_mask
+                mean_embeddings = mean_embeddings.to(dtype=h_for_memory.dtype)
             else:
-                # Fallback if no mask provided
-                mean_embeddings = h_for_memory.mean(dim=1)  # [batch, dim]
+                mean_embeddings = h_for_memory.mean(dim=1)
             
-            # Reshape to [batch, 1, dim] for MemoryGate
-            query_embeddings = mean_embeddings.unsqueeze(1)  # [batch, 1, dim]
+            query_embeddings = mean_embeddings.unsqueeze(1)
             
-            # 使用新的两阶段检索机制：先计算子分数，再生成候选
             scores_1, scores_2 = self.memory_gate.compute_sub_scores(query_embeddings)
             candidate_indices, candidate_scores = self.memory_gate.generate_candidates(scores_1, scores_2)
             bsz, _, num_candidates = candidate_indices.shape
             seq_len = h_for_memory.shape[1]
             
-            # candidate_indices: [batch, 1, num_candidates] -> [batch, seq_len, num_candidates]
-            # candidate_scores: [batch, 1, num_candidates] -> [batch, seq_len, num_candidates]
             candidate_indices = candidate_indices.expand(bsz, seq_len, num_candidates)
             candidate_scores = candidate_scores.expand(bsz, seq_len, num_candidates)
             
             candidate_indices_flat = candidate_indices.reshape(-1)
             candidate_token_ids = memory_bank[candidate_indices_flat]
             
-            batch_size_embed = 128
+            batch_size_embed = 32
             num_total_candidates = candidate_token_ids.shape[0]
             candidate_embeddings_list = []
             
@@ -168,12 +194,10 @@ class Qwen3ExplicitLMBlock(nn.Module):
                 end_idx = min(i + batch_size_embed, num_total_candidates)
                 batch_token_ids = candidate_token_ids[i:end_idx]
                 batch_embeddings = tok_embeddings(batch_token_ids)
-                
                 batch_memories = batch_embeddings.mean(dim=1)
                 candidate_embeddings_list.append(batch_memories)
                 del batch_embeddings, batch_token_ids
-                if (i // batch_size_embed) % 2 == 0:
-                    torch.cuda.empty_cache()
+                torch.cuda.empty_cache()
             
             candidate_memories_flat = torch.cat(candidate_embeddings_list, dim=0)
             candidate_memories = candidate_memories_flat.reshape(bsz, seq_len, num_candidates, self.hidden_size)
@@ -226,11 +250,9 @@ class Qwen3ExplicitLMBlock(nn.Module):
         flat_indices = candidate_indices.reshape(-1)
         flat_weights = selection_weights.reshape(-1)
         knowledge_num = self.memory_cfg["knowledge_num"]
-        # 确保memory_counts和flat_weights的数据类型一致（用于scatter_add）
         memory_counts = torch.zeros(knowledge_num, device=device, dtype=flat_weights.dtype)
         memory_counts.scatter_add_(0, flat_indices, flat_weights)
         with torch.no_grad():
-            # 转换为float32进行统计计算（quantile等操作需要float/double类型）
             memory_counts_fp32 = memory_counts.float()
             coverage_rate = (memory_counts_fp32 > 0.01).float().mean().item()
             top10_threshold = torch.quantile(memory_counts_fp32, 0.9)

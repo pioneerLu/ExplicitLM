@@ -1,16 +1,16 @@
 # ExplicitLM - Qwen3 显式记忆增强语言模型
 
-ExplicitLM 是一个创新的语言模型架构，通过引入显式记忆库（Memory Bank）解决传统语言模型知识更新困难和可解释性不足的问题。本项目基于 **Qwen3-4B** 模型，将知识以 token 序列的形式显式存储在共享记忆库中，通过可微分的检索和门控机制实现知识的透明管理、动态更新和端到端训练。
+ExplicitLM 基于 Qwen3-4B，通过显式记忆库实现知识的透明管理和动态更新。
 
-## 🎯 核心特性
+## 核心特性
 
-- **Qwen3 基础架构**：基于 Qwen3-4B 预训练模型，保持强大的语言理解能力
-- **显式记忆库**：将知识以 token 序列形式显式存储，支持直接查看和修改
-- **均值池化查询**：使用序列均值池化生成查询向量，提高记忆检索效率
-- **参数高效训练**：冻结 Qwen3 主模型参数，只训练记忆融合组件
-- **Shortcut 机制**：即使没有相关知识，backbone 也能正常工作，确保模型鲁棒性
+- **Qwen3 基础架构**：基于 Qwen3-4B 预训练模型
+- **显式记忆库**：知识以 token 序列形式显式存储
+- **均值池化查询**：使用序列均值池化生成查询向量
+- **多阶段训练**：分阶段训练 MemoryGate、Fusion 和联合微调
+- **参数高效训练**：冻结 Qwen3 主模型参数，只训练记忆相关组件
 
-## 📁 项目结构
+## 项目结构
 
 ```
 ExplicitLM/
@@ -22,85 +22,169 @@ ExplicitLM/
 │       ├── MemoryGate.py           # 记忆门控层（Product Key Memory）
 │       └── GatedMemoryFusion.py   # 门控记忆融合模块
 ├── config/                          # Hydra-Zen 配置
-│   ├── model.py                    # 模型配置
-│   ├── dataset.py                  # 数据集配置
-│   ├── training.py                 # 训练配置
-│   └── logging.py                  # 日志配置
 ├── utils/                           # 工具模块
-│   ├── model_initializer.py        # 模型初始化
-│   ├── pretrain_datasets.py        # 预训练数据加载
-│   ├── sft_datasets.py             # SFT 数据加载
-│   ├── train_loop_pretrain.py      # 预训练循环
-│   └── train_loop_sft.py           # SFT 训练循环
 ├── scripts/                         # 工具脚本
 │   ├── run_sft.sh                  # SFT 训练启动脚本
-│   └── convert_omcq_to_sft.py     # 数据转换脚本
-├── docs/                            # 文档
-│   ├── SFT_TRAINING.md            # SFT 训练指南
-│   └── GIT_SETUP.md               # Git 使用指南
-├── 1_pretrain.py                   # 预训练入口（Hydra-Zen）
-├── 2_sft.py                        # 监督微调入口（Hydra-Zen）
+│   └── run_router.sh               # Router 训练启动脚本
+├── train_router.py                 # 阶段1：MemoryGate 训练
+├── train_fusion.py                 # 阶段2：知识融合组件训练
+├── train_joint.py                  # 阶段3：联合微调
+├── 1_pretrain.py                   # 预训练入口
+├── 2_sft.py                        # 监督微调入口
 └── pyproject.toml                  # 项目依赖配置
 ```
 
-## 🚀 快速开始
+## 快速开始
 
 ### 环境准备
 
 ```bash
-# 1. 安装 uv 包管理器（如果未安装）
 curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 2. 安装项目依赖
 cd ExplicitLM
 uv sync
-
-# 3. 准备模型文件
-# - Qwen3-4B 模型：下载到指定路径（如 /path/to/Qwen3-4b）
 ```
 
-### 训练模型
+## 训练流程
 
-#### 预训练
+### 阶段1：MemoryGate 训练
+
+训练 MemoryGate 组件，学习从查询中检索相关记忆。
+
+**数据准备：**
+
+首先需要将 conversations 格式的数据转换为带真实标签的 query 格式：
 
 ```bash
-python 1_pretrain.py \
-    model.qwen3_model_path=/path/to/Qwen3-4b \
-    model.knowledge_num=1048576 \
-    model.knowledge_length=16 \
-    model.knowledge_dim=128 \
-    dataset.dataset_path=data/database/merged_pretrain.jsonl \
-    training.batch_size=48 \
-    training.learning_rate=2e-4 \
-    training.epochs=3
+uv run python convert_conversations_to_labeled.py \
+    --conversations_path data/train.jsonl \
+    --kb_path data/knowledge_base/sentence_trex_data.json \
+    --output_path data/train_labeled.jsonl \
+    --model_name BAAI/bge-base-en-v1.5 \
+    --top_k 32 \
+    --batch_size 32
 ```
 
-#### 监督微调（SFT）
+该脚本会：
+- 从知识库加载句子并编码
+- 使用 K-Means 训练 Product Key Memory 的 keys
+- 对查询进行 embedding 并检索最相关的知识库条目
+- 生成包含 `target_indices` 和 `target_scores` 的数据文件
+- 保存 `meta.json` 和 `keys.pt` 文件
+
+**开始训练：**
 
 ```bash
-# 方式1：使用启动脚本（推荐）
+bash scripts/run_router.sh
+```
+
+或手动运行：
+```bash
+export CUDA_VISIBLE_DEVICES=5,6
+uv run python train_router.py \
+    --data_path data/train_labeled.jsonl \
+    --model_name /data2/zengzheni/lvchangwei/new_repo/Qwen/models/Qwen3-4b \
+    --output_dir checkpoints/router \
+    --batch_size 1 \
+    --lr 1e-4 \
+    --epochs 3 \
+    --knowledge_num 65536 \
+    --knowledge_dim 2048 \
+    --num_candidates 32 \
+    --max_length 128 \
+    --temperature 0.5 \
+    --swanlab_project explicitlm-router
+```
+
+**关键参数：**
+- `--data_path`: 训练数据路径（query 格式，需包含 `target_indices` 和 `target_scores`）
+- `--model_name`: Qwen3 模型路径
+- `--knowledge_num`: 记忆库条目数（需为完全平方数，默认 65536，通常从 `meta.json` 自动读取）
+- `--output_dir`: 输出目录（MemoryGate 权重会保存为 `memory_gate_epoch_X.pth`）
+
+### 阶段2：知识融合训练
+
+加载预训练的 MemoryGate（冻结），训练 GatedMemoryFusion 和 memory_norm。
+
+```bash
+python train_fusion.py \
+    --qwen3_model_path /path/to/Qwen3-4b \
+    --pretrained_memory_gate_path checkpoints/router/memory_gate.pth \
+    --dataset_path data/database/merged_pretrain.jsonl \
+    --val_dataset_path data/benchmarks/eval_data.json \
+    --knowledge_num 65536 \
+    --knowledge_length 16 \
+    --knowledge_dim 128 \
+    --num_candidates 8 \
+    --batch_size 8 \
+    --accumulation_steps 16 \
+    --lr 1e-4 \
+    --epochs 3 \
+    --warmup_steps 100 \
+    --ce_loss_coef 1.0 \
+    --output_dir checkpoints/fusion \
+    --swanlab_project explicitlm-fusion
+```
+
+### 阶段3：联合微调
+
+联合训练 MemoryGate 和 GatedMemoryFusion，使用完整的三损失系统。
+
+```bash
+python train_joint.py \
+    --qwen3_model_path /path/to/Qwen3-4b \
+    --pretrained_memory_gate_path checkpoints/router/memory_gate.pth \
+    --pretrained_fusion_path checkpoints/fusion/fusion_weights.pth \
+    --dataset_path data/database/merged_pretrain.jsonl \
+    --val_dataset_path data/benchmarks/eval_data.json \
+    --knowledge_num 65536 \
+    --knowledge_length 16 \
+    --num_candidates 8 \
+    --batch_size 8 \
+    --accumulation_steps 16 \
+    --lr 1e-4 \
+    --epochs 3 \
+    --ce_loss_coef 1.0 \
+    --similarity_loss_coef 0.1 \
+    --diversity_loss_coef 0.05 \
+    --output_dir checkpoints/joint \
+    --swanlab_project explicitlm-joint
+```
+
+### SFT 训练
+
+使用监督微调优化下游任务表现。
+
+```bash
 bash scripts/run_sft.sh
+```
 
-# 方式2：直接运行
+或直接运行：
+```bash
 python 2_sft.py \
-    model.qwen3_model_path=/path/to/Qwen3-4b \
-    model.pretrained_sft_model_path=out/pretrain_latest.pth \
+    +model.qwen3_model_path=/path/to/Qwen3-4b \
+    model.cache_path=data/cache/knowledge_cache.pt \
+    model.recompute_cache=False \
+    model.max_seq_len=256 \
     dataset.sft_dataset_path=sft_data/omcq_trex_sft.jsonl \
+    dataset.pretrained_sft_model_path=out/pretrain_latest.pth \
+    dataset.sft_val_dataset_path=data/benchmarks/eval_data.json \
+    training.learning_rate=5e-5 \
     training.batch_size=1 \
     training.accumulation_steps=128 \
-    training.epochs=3
+    training.epochs=3 \
+    training.zero_stage=3 \
+    logging.out_dir=out \
+    logging.save_dir=out
 ```
 
-详细训练指南请参考 [SFT 训练文档](docs/SFT_TRAINING.md)。
-
-## 🔧 核心配置参数
+## 核心配置参数
 
 ### 模型参数
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `qwen3_model_path` | Qwen3-4B 模型路径 | **必需** |
-| `knowledge_num` | 记忆库条目总数（需为完全平方数） | 1048576 |
+| `knowledge_num` | 记忆库条目总数（需为完全平方数） | 65536 |
 | `knowledge_length` | 每个记忆条目的 token 数 | 16 |
 | `knowledge_dim` | 记忆嵌入向量维度 | 128 |
 
@@ -109,43 +193,47 @@ python 2_sft.py \
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `num_candidates` | 最终输出的候选数 | 8 |
-| `num_candidates_internal` | 内部检索数量 | 128 |
 | `num_selected` | 选中的条目数 | 1 |
 | `gumbel_temperature` | Gumbel-Softmax 温度 | 1.0 |
 
-### 知识库初始化
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `cache_path` | 预处理知识库缓存路径 | `data/cache/knowledge_cache.pt` |
-| `recompute_cache` | 是否重新计算缓存 | False |
-
-## 📊 训练策略
+## 训练策略
 
 ### 参数冻结
 
-- **Qwen3 主模型**：完全冻结（`requires_grad=False`）
-- **记忆库（Memory Bank）**：训练时固定，推理时可通过 LLMLingua 更新
-- **记忆融合组件**：可训练
-  - `memory_gate`：记忆门控层（Product Key Memory）
-  - `gated_memory_fusion`：门控融合模块（含 Shortcut 机制）
-  - `memory_norm`：记忆归一化层
+- **Qwen3 主模型**：完全冻结
+- **记忆库（Memory Bank）**：训练时固定
+- **记忆组件训练策略**：
+  - **阶段1**：只训练 `memory_gate`
+  - **阶段2**：只训练 `gated_memory_fusion` 和 `memory_norm`（MemoryGate 冻结）
+  - **阶段3**：联合训练 `memory_gate`、`gated_memory_fusion` 和 `memory_norm`
 
-### 记忆检索机制
+### 损失函数
 
-1. **均值池化查询**：对序列进行均值池化生成查询向量
-2. **两阶段检索**：
-   - 第一阶段：使用 Product Key Memory 检索候选记忆
-   - 第二阶段：每个位置独立计算相似度并选择最相关的记忆
-3. **门控融合**：根据相似度动态控制记忆贡献（Shortcut 机制）
+- **阶段1（Router）**：Soft Label Loss
+- **阶段2（Fusion）**：主要使用 CE Loss
+- **阶段3（Joint）**：CE Loss + Similarity Loss + Diversity Loss
+- **SFT**：CE Loss + Similarity Loss + Diversity Loss
 
-## 📝 数据格式
+## 数据格式
+
+### Router 训练数据（JSONL）
+
+Router 训练需要使用带真实标签的 query 格式数据。如果原始数据是 conversations 格式，需要先使用 `convert_conversations_to_labeled.py` 进行转换。
+
+**Query 格式（必需）**
+```jsonl
+{"query": "问题或文本", "target_indices": [1, 5, 10], "target_scores": [0.9, 0.8, 0.7]}
+{"query": "另一个问题", "target_indices": [3, 7], "target_scores": [0.95, 0.85]}
+```
+
+- `query`: 查询文本
+- `target_indices`: 目标记忆条目的索引列表（通过 FAISS 检索生成）
+- `target_scores`: 对应的相似度分数（可选，默认为 1.0）
 
 ### 预训练数据（JSONL）
 
 ```jsonl
 {"text": "人工智能是计算机科学的一个分支..."}
-{"text": "机器学习是人工智能的核心技术..."}
 ```
 
 ### SFT 数据（JSONL）
@@ -159,40 +247,18 @@ python 2_sft.py \
 }
 ```
 
-## 🛠️ 开发指南
+## 注意事项
 
-### 添加新的记忆更新策略
+1. **模型路径配置**：确保 Qwen3-4B 模型路径正确
+2. **记忆库大小**：`knowledge_num` 必须是完全平方数（如 1024, 4096, 65536）
+3. **训练顺序**：建议按照阶段1 → 阶段2 → 阶段3 → SFT 的顺序进行训练
+4. **Router 训练数据准备**：训练前必须先运行 `convert_conversations_to_labeled.py` 生成带真实标签的数据
+5. **GPU 内存**：如果遇到 OOM，可以减小 `batch_size`、`knowledge_num` 或调整 DeepSpeed 配置
+6. **CUDA_VISIBLE_DEVICES**：必须在运行脚本**之前**设置（在导入 torch 之前），推荐使用启动脚本
 
-在 `utils/memory_bank_updater.py` 中实现新的更新策略。
+## SwanLab 配置
 
-### 自定义事实提取器
-
-在 `utils/fact_extractor.py` 中扩展提取逻辑。
-
-## 📚 相关文档
-
-- [SFT 训练指南](docs/SFT_TRAINING.md)：详细的监督微调流程
-- [Git 使用指南](docs/GIT_SETUP.md)：Git 仓库管理
-
-## ⚠️ 注意事项
-
-1. **模型路径配置**：确保 Qwen3-4B 模型路径正确，包含 `config.json` 和权重文件
-2. **记忆库大小**：`knowledge_num` 必须是完全平方数（如 1024, 4096, 1048576）
-3. **内存要求**：记忆库大小为 `knowledge_num × knowledge_length`，需要足够内存
-4. **训练模式**：当前版本冻结 Qwen3 主模型，只训练记忆融合组件
-5. **DeepSpeed**：推荐使用 DeepSpeed ZeRO-3 进行分布式训练
-
-## 🔬 实验建议
-
-1. **小规模测试**：先用小规模记忆库（如 1024 条目）验证流程
-2. **渐进式训练**：先训练少量 epoch 观察损失变化
-3. **参数调优**：根据任务调整 `num_candidates`、`gumbel_temperature` 等参数
-
-## 📄 许可证
-
-本项目采用研究性许可，仅供学术研究使用。
-
-## 🙏 致谢
-
-- [Qwen](https://github.com/QwenLM/Qwen)：基础语言模型
-- [LLMLingua](https://github.com/microsoft/LLMLingua)：文本压缩技术
+SwanLab API Key 可通过以下方式设置（优先级从高到低）：
+1. 命令行参数 `--swanlab_api_key`
+2. 环境变量 `SWANLAB_API_KEY`
+3. `.env` 文件中的 `SWANLAB_API_KEY`

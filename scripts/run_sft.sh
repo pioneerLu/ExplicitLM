@@ -1,9 +1,9 @@
 #!/bin/bash
-# SFT 训练启动脚本：使用 GPU 6 和 7
+# SFT 训练启动脚本
 
 # ========== 配置区域 ==========
-# 设置GPU可见设备
-export CUDA_VISIBLE_DEVICES=6,7
+# 设置GPU可见设备（使用3卡：4, 6, 7 以平衡显存）
+export CUDA_VISIBLE_DEVICES=4,6,5
 
 # 设置PyTorch内存分配配置
 export PYTORCH_ALLOC_CONF=expandable_segments:True
@@ -13,6 +13,9 @@ export SWANLAB_API_KEY=GtiI1qjU5lco6MKKSrRmN
 
 # 进入项目目录
 cd /data2/zengzheni/lvchangwei/new_repo/ExplicitLM
+
+# 设置进程显示名称（在 nvidia-smi 中显示的名称）
+export PYTHON_PROCESS_NAME="llama-env"
 
 # 优先使用 uv
 if command -v uv &> /dev/null; then
@@ -34,9 +37,9 @@ fi
 
 # 显示GPU信息
 echo "=========================================="
-echo "使用GPU: 6, 7"
+echo "使用GPU: 4, 6, 7"
 echo "=========================================="
-nvidia-smi --query-gpu=index,name,memory.total,memory.free --format=csv,noheader | grep -E "^[67],"
+nvidia-smi --query-gpu=index,name,memory.total,memory.free --format=csv,noheader | grep -E "^[467],"
 
 # ========== 训练配置 ==========
 # 请根据实际情况修改以下路径

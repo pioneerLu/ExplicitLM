@@ -329,7 +329,12 @@ def train_epoch_sft(
         optimizer.step()
         optimizer.zero_grad()
 
-        # Memory bank在训练时固定，推理时通过LLMLingua更新，不再需要EMA更新
+        # 定期清理显存缓存，减少内存碎片（根据警告建议）
+        if (step + 1) % args.training.accumulation_steps == 0:
+            if hasattr(accelerator, 'get_accelerator'):
+                accelerator.get_accelerator().empty_cache()
+            elif hasattr(torch.cuda, 'empty_cache'):
+                torch.cuda.empty_cache()
 
         # 训练日志记录（仅主进程）
         if (step + 1) % args.logging.log_interval == 0 and accelerator.is_main_process:
