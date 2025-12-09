@@ -4,22 +4,16 @@
     "gradient_accumulation_steps": "auto",
     "gradient_clipping": "auto",
     "zero_optimization": {
-        "stage": 3,
+        "stage": 2,
         "offload_optimizer": {
-            "device": "none"
-        },
-        "offload_param": {
             "device": "none"
         },
         "overlap_comm": true,
         "contiguous_gradients": true,
-        "sub_group_size": 1e9,
-        "reduce_bucket_size": 1e7,
-        "stage3_prefetch_bucket_size": 5e6,
-        "stage3_param_persistence_threshold": 1e4,
-        "stage3_max_live_parameters": 5e7,
-        "stage3_max_reuse_distance": 1e7,
-        "stage3_gather_16bit_weights_on_model_save": true
+        "reduce_bucket_size": 5e7,
+        "allgather_partitions": true,
+        "allgather_bucket_size": 5e7,
+        "round_robin_gradients": true
     },
     "fp16": {
         "enabled": false

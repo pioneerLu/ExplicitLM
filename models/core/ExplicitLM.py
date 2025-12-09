@@ -82,39 +82,33 @@ class ExplicitLM(PreTrainedModel):
             knowledge_length = memory_cfg["knowledge_length"]
             
             # memory_bank存储token IDs，训练时固定，推理时通过LLMLingua更新
+            # 存储在CPU上以节省GPU显存，使用时临时传输到GPU
+            memory_bank_tensor = torch.randint(
+                0, qwen3_config.vocab_size, (knowledge_num, knowledge_length)
+            )
             self.register_buffer(
                 "memory_bank",
-                torch.randint(
-                    0, qwen3_config.vocab_size, (knowledge_num, knowledge_length)
-                ),
+                memory_bank_tensor,
                 persistent=True,  # 持久化，确保保存和加载时包含
             )
+            # 将 memory_bank 移到 CPU 以节省 GPU 显存
+            self.memory_bank = self.memory_bank.cpu()
 
             # 记录上一步的记忆库状态（用于统计）
+            # prev_memory_bank 也存储在 CPU 上
             self.register_buffer(
                 "prev_memory_bank",
                 torch.zeros_like(self.memory_bank),
                 persistent=False,
             )
+            self.prev_memory_bank = self.prev_memory_bank.cpu()
 
-            freeze_ratio = memory_cfg.get("freeze_ratio", 0.0)
-            if freeze_ratio > 0.0:
-                freeze_num = int(knowledge_num * freeze_ratio)
-                freeze_mask = torch.zeros(knowledge_num, dtype=torch.bool)
-                freeze_mask[:freeze_num] = True
-                self.register_buffer("freeze_mask", freeze_mask, persistent=False)
-                print(
-                    f"🔥 Memory bank freezing enabled: {freeze_num}/{knowledge_num} "
-                    f"entries ({freeze_ratio*100:.1f}%) frozen",
-                    flush=True,
-                )
-            else:
-                self.register_buffer(
-                    "freeze_mask",
-                    torch.zeros(knowledge_num, dtype=torch.bool),
-                    persistent=False,
-                )
-                print("🔥 Memory bank freezing disabled: all entries can be updated", flush=True)
+            # 注册 freeze_mask buffer（全 False，所有条目都可以更新）
+            self.register_buffer(
+                "freeze_mask",
+                torch.zeros(knowledge_num, dtype=torch.bool),
+                persistent=False,
+            )
         else:
             # MOE 模式：不需要 memory_bank
             self.memory_bank = None

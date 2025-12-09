@@ -124,7 +124,6 @@ class FactExtractor:
             }
         except Exception as e:
             print(f"警告: 事实提取失败: {e}")
-            # 失败时返回原始文本
             return {
                 'compressed_text': text,
                 'original_tokens': len(text.split()),

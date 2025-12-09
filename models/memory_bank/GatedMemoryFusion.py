@@ -40,7 +40,7 @@ class GatedMemoryFusion(nn.Module):
         self.dropout = nn.Dropout(cfg["dropout"])
 
     def forward(
-        self,
+        self,   
         h_attn: torch.Tensor,
         selected_memory: torch.Tensor,
         similarity_scores: Optional[torch.Tensor] = None

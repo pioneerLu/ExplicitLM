@@ -71,9 +71,11 @@ git commit -m "docs: 更新SFT训练文档"
 ## 当前项目主要文件
 
 ### 核心代码
-- `1_pretrain.py` - 预训练脚本
-- `2_sft.py` - SFT训练脚本
-- `config/` - 配置文件
+- `train_router.py` - MemoryGate 训练脚本
+- `train_fusion.py` - Fusion 组件训练脚本
+- `train_joint.py` - 联合微调脚本
+- `train_memory.py` - 记忆组件训练脚本（只训练记忆模块，冻结 Qwen3 backbone）
+- `config/` - 配置模块（使用字典格式，支持命令行参数覆盖）
 - `utils/` - 工具函数
 
 ### 脚本

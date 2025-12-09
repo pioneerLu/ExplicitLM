@@ -18,7 +18,9 @@ from transformers.utils import TransformersKwargs
 from typing import Unpack
 
 from models.memory_bank.MemoryGate import MemoryGate
+from models.memory_bank.MemoryGateLoRA import MemoryGateLoRA
 from models.memory_bank.GatedMemoryFusion import GatedMemoryFusion
+from models.memory_bank.GatedMemoryFusionLoRA import GatedMemoryFusionLoRA
 from models.layers.RMSNorm import RMSNorm
 
 logger = logging.getLogger(__name__)
@@ -48,8 +50,23 @@ class Qwen3ExplicitLMBlock(nn.Module):
             
             memory_cfg_with_dim = memory_cfg.copy()
             memory_cfg_with_dim["dim"] = config.hidden_size
-            self.memory_gate = MemoryGate(memory_cfg_with_dim)
-            self.gated_memory_fusion = GatedMemoryFusion(memory_cfg_with_dim)
+            
+            # 根据 gate_rank 选择 MemoryGate 版本
+            gate_rank = memory_cfg.get("gate_rank", None)
+            if gate_rank is None or gate_rank == 0:
+                self.memory_gate = MemoryGate(memory_cfg_with_dim)
+            else:
+                memory_cfg_with_dim["gate_rank"] = gate_rank
+                self.memory_gate = MemoryGateLoRA(memory_cfg_with_dim)
+            
+            # 根据 fusion_rank 选择融合模块版本
+            fusion_rank = memory_cfg.get("fusion_rank", None)
+            if fusion_rank is None or fusion_rank == 0:
+                self.gated_memory_fusion = GatedMemoryFusion(memory_cfg_with_dim)
+            else:
+                memory_cfg_with_dim["fusion_rank"] = fusion_rank
+                self.gated_memory_fusion = GatedMemoryFusionLoRA(memory_cfg_with_dim)
+            
             self.gumbel_temperature = memory_cfg.get("gumbel_temperature", 1.0)
         else:
             self.memory_norm = None
@@ -184,6 +201,9 @@ class Qwen3ExplicitLMBlock(nn.Module):
             candidate_scores = candidate_scores.expand(bsz, seq_len, num_candidates)
             
             candidate_indices_flat = candidate_indices.reshape(-1)
+            # memory_bank 存储在 CPU 上，使用时临时传输到 GPU
+            if memory_bank.device.type != 'cuda':
+                memory_bank = memory_bank.to(candidate_indices_flat.device, non_blocking=True)
             candidate_token_ids = memory_bank[candidate_indices_flat]
             
             batch_size_embed = 32
@@ -203,10 +223,11 @@ class Qwen3ExplicitLMBlock(nn.Module):
             candidate_memories = candidate_memories_flat.reshape(bsz, seq_len, num_candidates, self.hidden_size)
             del candidate_embeddings_list, candidate_memories_flat, candidate_token_ids, candidate_indices_flat
             
-            h_for_memory_expanded = h_for_memory.unsqueeze(2)
-            h_expanded = h_for_memory_expanded.expand_as(candidate_memories)
-            similarity_scores = F.cosine_similarity(h_expanded, candidate_memories, dim=-1)
-            del h_expanded, h_for_memory_expanded
+            # 优化：归一化后立即计算相似度，减少中间张量
+            h_normalized = F.normalize(h_for_memory, p=2, dim=-1)
+            candidate_normalized = F.normalize(candidate_memories, p=2, dim=-1)
+            similarity_scores = torch.einsum('bsd,bsnd->bsn', h_normalized, candidate_normalized)
+            del h_normalized, candidate_normalized
             
             selection_weights, selected_indices = self.gumbel_softmax_selection(
                 similarity_scores, temperature=self.gumbel_temperature, hard=True
@@ -217,6 +238,9 @@ class Qwen3ExplicitLMBlock(nn.Module):
             diversity_loss = self.compute_diversity_loss(candidate_memories)
             
             selected_memory = (candidate_memories * selection_weights.unsqueeze(-1)).sum(dim=2)
+            # 计算完成后立即释放 candidate_memories 以节省显存
+            del candidate_memories
+            torch.cuda.empty_cache()
             memory_output = self.gated_memory_fusion(
                 h_for_memory, 
                 selected_memory,

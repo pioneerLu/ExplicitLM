@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 from transformers import AutoTokenizer, AutoConfig
 from transformers.models.qwen3.modeling_qwen3 import Qwen3Config
-from hydra.utils import get_original_cwd
+# 移除 hydra 依赖，使用标准库
 from pathlib import Path
 from utils.logger import Logger
 
@@ -247,21 +247,28 @@ def _init_qwen3_model(args: dict, accelerator=None):
         "knowledge_num": args.get("knowledge_num", 1024 * 1024),
         "knowledge_length": args.get("knowledge_length", 16),
         "knowledge_dim": args.get("knowledge_dim", 128),
-        # Memory bank在训练时固定，推理时通过LLMLingua更新（不再使用EMA）
-        "freeze_ratio": args.get("freeze_ratio", 0.2),
         "num_candidates": args.get("num_candidates", 16),
         "num_selected": args.get("num_selected", 1),
         "gumbel_temperature": args.get("gumbel_temperature", 1.0),
         "use_moe": args.get("use_moe", False),
         "dropout": args.get("dropout", 0.0),
+        # LoRA 配置
+        "gate_rank": args.get("gate_rank", None),
+        "fusion_rank": args.get("fusion_rank", None),
     }
+    
+    # 如果配置中指定了 keys_path，添加到 memory_cfg
+    if "keys_path" in args and args.get("keys_path"):
+        # 处理相对路径
+        keys_path = args["keys_path"]
+        if not os.path.isabs(keys_path):
+            # 使用当前工作目录（不再依赖 hydra）
+            original_cwd = os.getcwd()
+            keys_path = os.path.join(original_cwd, keys_path)
+        memory_cfg["keys_path"] = keys_path
     from models.core.ExplicitLM import ExplicitLM
     
-    try:
-        original_cwd = get_original_cwd()
-    except ValueError:
-        # 非 Hydra 环境，使用当前工作目录
-        original_cwd = os.getcwd()
+    original_cwd = os.getcwd()
     local_tokenizer_path = Path(original_cwd) / "models" / "qwen_tokenizer"
     if local_tokenizer_path.exists() and (local_tokenizer_path / "tokenizer.json").exists():
         Logger(f"  - 使用本地tokenizer: {local_tokenizer_path}", accelerator)
@@ -277,8 +284,11 @@ def _init_qwen3_model(args: dict, accelerator=None):
         tokenizer.pad_token_id = tokenizer.eos_token_id
         Logger("警告: Qwen tokenizer没有pad_token，使用eos_token作为pad_token", accelerator)
 
-    # 创建模型
+    # 创建模型（确保在CPU上初始化，DeepSpeed ZeRO-3会在prepare时处理）
+    # 显式指定设备为CPU，避免模型初始化时占用GPU显存
     model = ExplicitLM(qwen3_config=qwen3_config, memory_cfg=memory_cfg)
+    # 确保模型所有参数和buffers都在CPU上
+    model = model.cpu()
 
     # 从Qwen3预训练模型加载权重
     try:
@@ -366,7 +376,12 @@ def _init_qwen3_model(args: dict, accelerator=None):
         
         # 清理临时模型
         del pretrained_model
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            # 强制同步，确保显存释放
+            torch.cuda.synchronize()
         
     except Exception as e:
         Logger(f"警告: 从预训练模型加载权重失败: {e}", accelerator)
@@ -415,7 +430,6 @@ def _init_qwen3_model(args: dict, accelerator=None):
         # 所以始终设置为不可训练
         is_memory_bank = "memory_bank" in name
         if is_memory_bank:
-            # memory_bank始终不可训练，避免DeepSpeed梯度平均时的类型错误
             param.requires_grad = False
             frozen_params += param.numel()
         elif is_memory_component:
@@ -437,14 +451,16 @@ def load_pretrained_memory_gate(model: nn.Module, memory_gate_path: str, acceler
     """
     加载预训练的 MemoryGate 权重到 ExplicitLM 的所有层
     
+    支持两种格式：
+    1. 直接的 state_dict (OrderedDict)
+    2. router_only.pt 格式: {'head': OrderedDict, 'memory_gate_cfg': dict}
+    
     Args:
         model: ExplicitLM 模型实例
         memory_gate_path: MemoryGate 权重文件路径
         accelerator: Accelerator 实例（可选，用于日志）
     """
-    if accelerator is None:
-        from utils.logger import Logger
-        Logger = lambda msg, acc: print(msg)
+    from utils.logger import Logger
     
     Logger(f"加载预训练 MemoryGate 权重: {memory_gate_path}", accelerator)
     
@@ -452,7 +468,22 @@ def load_pretrained_memory_gate(model: nn.Module, memory_gate_path: str, acceler
         raise FileNotFoundError(f"MemoryGate 权重文件不存在: {memory_gate_path}")
     
     # 加载权重
-    memory_gate_state = torch.load(memory_gate_path, map_location='cpu')
+    loaded_data = torch.load(memory_gate_path, map_location='cpu')
+    
+    # 处理不同的文件格式
+    if isinstance(loaded_data, dict):
+        # 检查是否是 router_only.pt 格式
+        if 'head' in loaded_data:
+            Logger("检测到 router_only.pt 格式，提取 head 权重", accelerator)
+            memory_gate_state = loaded_data['head']
+            if 'memory_gate_cfg' in loaded_data:
+                Logger(f"Router 配置: {loaded_data['memory_gate_cfg']}", accelerator)
+        else:
+            # 直接是 state_dict
+            memory_gate_state = loaded_data
+    else:
+        # 直接是 OrderedDict
+        memory_gate_state = loaded_data
     
     # 统计加载情况
     loaded_layers = 0
@@ -488,6 +519,48 @@ def load_pretrained_memory_gate(model: nn.Module, memory_gate_path: str, acceler
         Logger(f"警告: {len(unexpected_keys)} 个意外参数（前5个）: {unexpected_keys[:5]}", accelerator)
     
     return loaded_layers
+
+
+def load_pretrained_fusion(model: nn.Module, fusion_path: str, accelerator=None):
+    """
+    加载预训练的知识融合组件权重（GatedMemoryFusion + memory_norm）
+    
+    Args:
+        model: ExplicitLM 模型实例
+        fusion_path: Fusion 权重文件路径
+        accelerator: Accelerator 实例（可选，用于日志）
+    """
+    from utils.logger import Logger
+    
+    Logger(f"加载预训练 Fusion 权重: {fusion_path}", accelerator)
+    
+    if not os.path.exists(fusion_path):
+        Logger(f"警告: Fusion 权重文件不存在: {fusion_path}，将跳过加载", accelerator)
+        return False
+    
+    checkpoint = torch.load(fusion_path, map_location='cpu')
+    
+    # 只加载 fusion 相关的权重
+    fusion_keys = [k for k in checkpoint.keys() if 'gated_memory_fusion' in k or 'memory_norm' in k]
+    
+    if not fusion_keys:
+        Logger("警告: 检查点中未找到 Fusion 相关权重", accelerator)
+        return False
+    
+    # 加载权重到所有层
+    model_state_dict = model.state_dict()
+    loaded_keys = []
+    
+    for key in fusion_keys:
+        if key in model_state_dict:
+            if model_state_dict[key].shape == checkpoint[key].shape:
+                model_state_dict[key] = checkpoint[key]
+                loaded_keys.append(key)
+    
+    model.load_state_dict(model_state_dict, strict=False)
+    Logger(f"✓ Fusion 权重加载完成: {len(loaded_keys)} 个参数", accelerator)
+    
+    return True
 
 
 def _initialize_database(
@@ -542,6 +615,9 @@ def _set_database_attribute(model: nn.Module, attribute_path: str, data: torch.T
         target = getattr(target, attr)
     final_attr = attributes[-1]
     if hasattr(target, final_attr):
+        # memory_bank 存储在 CPU 上以节省 GPU 显存
+        if final_attr == "memory_bank":
+            data = data.cpu()
         getattr(target, final_attr).data.copy_(data)
     else:
         Logger(f"警告: 找不到 model.{attribute_path}", accelerator)

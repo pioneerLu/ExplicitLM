@@ -1,10 +1,12 @@
-# SFT 训练指南：使用 OMCQ 数据训练知识融合模块
+# 记忆组件训练指南：使用 OMCQ 数据训练知识融合模块
 
-本文档说明如何使用 OMCQ 数据对 ExplicitLM 的知识融合模块进行监督微调（SFT）。
+本文档说明如何使用 OMCQ 数据对 ExplicitLM 的记忆组件进行训练。
 
 ## 概述
 
-SFT 训练的目标是：
+**注意**：这不是传统的 SFT（Supervised Fine-Tuning），因为 Qwen3 backbone 完全冻结，只训练记忆相关组件。
+
+训练的目标是：
 - **冻结 Qwen3 主模型参数**：保持预训练模型的知识
 - **只训练知识融合模块**：包括 `memory_gate`、`gated_memory_fusion`、`memory_norm`
 - **使用 OMCQ 数据**：约 157 万条多选题数据，训练模型如何利用记忆库回答问题
@@ -56,113 +58,59 @@ python3 scripts/test_sft_data.py \
 
 ## 步骤 3：配置训练参数
 
-### 3.1 更新数据集配置
-
-编辑 `config/dataset.py`，设置 SFT 数据路径：
-
-```python
-DatasetConf = builds(
-    dict,
-    # ... 其他配置 ...
-    # ---- sft 相关字段 ----
-    pretrained_sft_model_path="out/pretrain_latest.pth",  # 预训练模型路径
-    sft_dataset_path="sft_data/omcq_trex_sft.jsonl",      # SFT 训练数据
-    sft_val_dataset_path="data/benchmarks/eval_data.json", # SFT 验证数据
-)
-```
-
-### 3.2 更新模型配置
-
-编辑 `config/model.py`，确保：
-- 使用预训练的 cache 知识库
-- 参数冻结已启用（在 `model_initializer.py` 中自动处理）
-
-```python
-ModelConf = builds(
-    dict,
-    # ... 其他配置 ...
-    cache_path="data/cache/knowledge_cache.pt",  # 使用预训练的 cache
-    recompute_cache=False,                        # 不重新计算
-)
-```
-
-### 3.3 更新训练配置
-
-编辑 `config/training.py`，设置 SFT 训练超参数：
-
-```python
-TrainingConf = builds(
-    dict,
-    batch_size=4,                    # 批次大小
-    accumulation_steps=32,           # 梯度累积步数
-    epochs=3,                        # 训练轮数
-    learning_rate=5e-5,              # 学习率（SFT 通常较小）
-    # ... 其他配置 ...
-)
-```
+训练参数可以通过命令行直接覆盖默认配置。默认配置在 `config/` 目录下的各个文件中定义。
 
 **推荐配置**：
 - **学习率**：`5e-5` 到 `1e-4`（知识融合模块通常需要较小的学习率）
-- **批次大小**：根据 GPU 显存调整（4-8）
+- **批次大小**：根据 GPU 显存调整（1-4，分布式训练建议使用 1）
 - **梯度累积**：保持有效批次大小在 128-256
 - **训练轮数**：1-3 轮（SFT 通常不需要太多轮次）
+- **数据加载器**：分布式训练中自动使用 `num_workers=0` 以避免同步问题
 
 ## 步骤 4：启动训练
 
-### 4.1 使用命令行参数覆盖配置
+### 4.1 使用启动脚本（推荐）
+
+```bash
+cd /data2/zengzheni/lvchangwei/new_repo/ExplicitLM
+bash scripts/run_sft.sh
+```
+
+### 4.2 使用命令行参数
 
 ```bash
 cd /data2/zengzheni/lvchangwei/new_repo/ExplicitLM
 
-python3 2_sft.py \
+uv run accelerate launch --config_file accelerate_config.yaml train_memory.py \
     model.qwen3_model_path=/path/to/Qwen3-4b \
     model.cache_path=data/cache/knowledge_cache.pt \
     model.recompute_cache=False \
     dataset.sft_dataset_path=sft_data/omcq_trex_sft.jsonl \
-    dataset.pretrained_sft_model_path=out/pretrain_latest.pth \
+    dataset.pretrained_router_path=router_only.pt \
+    dataset.pretrained_fusion_path="" \
+    dataset.sft_val_dataset_path=data/benchmarks/eval_data.json \
     training.learning_rate=5e-5 \
-    training.batch_size=4 \
+    training.batch_size=1 \
     training.epochs=3 \
-    training.accumulation_steps=32
+    training.accumulation_steps=128 \
+    training.zero_stage=2 \
+    model.keys_path=data/keys.pt \
+    model.gate_rank=128 \
+    model.fusion_rank=128 \
+    logging.out_dir=out \
+    logging.save_dir=out
 ```
 
-### 4.2 使用配置文件（推荐）
-
-创建配置文件 `config/sft_omcq.yaml`：
-
-```yaml
-defaults:
-  - model
-  - dataset
-  - training
-  - logging
-
-model:
-  qwen3_model_path: /path/to/Qwen3-4b
-  cache_path: data/cache/knowledge_cache.pt
-  recompute_cache: false
-
-dataset:
-  sft_dataset_path: sft_data/omcq_trex_sft.jsonl
-  pretrained_sft_model_path: out/pretrain_latest.pth
-
-training:
-  learning_rate: 5e-5
-  batch_size: 4
-  epochs: 3
-  accumulation_steps: 32
-```
-
-然后运行：
-```bash
-python3 2_sft.py --config-name sft_omcq
-```
+**参数说明**：
+- 使用 `key=value` 格式，支持点号访问（如 `model.qwen3_model_path`）
+- 参数会自动进行类型转换（布尔值、整数、浮点数，包括科学计数法如 `5e-5`）
+- 所有参数都是可选的，未指定的参数使用默认值（定义在 `config/` 目录下）
 
 ## 步骤 5：监控训练
 
 训练过程中会：
 1. **自动冻结 Qwen3 主模型参数**：只训练知识融合模块
-2. **显示可训练参数统计**：确认只有记忆相关组件在训练
+2. **显示可训练参数统计**：确认只有记忆相关组件在训练（应该显示 **0.208B** 可训练参数）
 3. **记录训练损失**：通过 SwanLab 可视化（如果启用）
 
 ### 参数冻结验证
@@ -172,31 +120,18 @@ python3 2_sft.py --config-name sft_omcq
 🔒 冻结Qwen主模型参数...
 ✅ 参数冻结完成:
   - 冻结参数: XXXX.XXX 百万
-  - 可训练参数: XX.XXX 百万
+  - 可训练参数: 208.XXX 百万（约 0.208B）
   - 冻结比例: XX.XX%
 ```
 
-确认可训练参数数量合理（通常只有几百万参数，主要是知识融合模块）。
+**重要**：确认可训练参数为 **0.208B**（不是 0.265B 或更高）。如果显示更高，说明 keys 被错误设置为可训练，需要检查参数冻结逻辑。
 
 ## 步骤 6：验证训练结果
 
-训练完成后，使用 `examples/quick_start.py` 测试生成效果：
+训练完成后，检查输出目录中的检查点文件：
+- `out/sft_*.pth` - 训练检查点（按步数命名）
 
-```python
-# 加载训练后的模型
-args = {
-    'qwen3_model_path': '/path/to/Qwen3-4b',
-    'cache_path': 'data/cache/knowledge_cache.pt',
-    # ... 其他配置 ...
-}
-
-model, tokenizer = init_model(args)
-# 加载 SFT 后的权重
-model.load_state_dict(torch.load('out/sft_latest.pth'))
-
-# 测试生成
-# ...
-```
+可以使用这些检查点进行推理或继续训练。
 
 ## 常见问题
 
@@ -216,7 +151,7 @@ model.load_state_dict(torch.load('out/sft_latest.pth'))
 
 ### Q3: 如何只训练部分知识融合模块？
 
-修改 `utils/model_initializer.py` 中的 `_freeze_qwen_params` 函数，调整 `is_memory_component` 的判断逻辑。
+修改 `train_memory.py` 中的参数冻结逻辑，调整 `is_memory_component` 的判断条件。
 
 ### Q4: 训练后生成效果没有改善？
 

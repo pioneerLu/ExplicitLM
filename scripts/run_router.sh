@@ -41,9 +41,8 @@ else
 fi
 
 # ========== 训练配置 ==========
-# 请根据实际情况修改以下路径和参数
 DATA_PATH="data/train_labeled.jsonl"
-MODEL_NAME="/data2/zengzheni/lvchangwei/new_repo/Qwen/models/Qwen3-4b"
+MODEL_NAME= "/data2/zengzheni/lvchangwei/new_repo/Qwen/models/Qwen3-4b"
 OUTPUT_DIR="checkpoints/router"
 BATCH_SIZE=1
 LR=1e-4
