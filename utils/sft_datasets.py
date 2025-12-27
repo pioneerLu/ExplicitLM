@@ -13,6 +13,7 @@ SFT（监督微调）数据集处理模块
 
 import json
 import os
+import hashlib
 from typing import Dict, List, Tuple, Any, Union
 
 import torch
@@ -21,6 +22,128 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 # 设置tokenizers并行化为True以提升性能
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
+
+# Tokenizer 缓存目录
+TOKENIZER_CACHE_DIR = "/data2/zengzheni/lvchangwei/new_repo/ExplicitLM/tokenizer_cache"
+
+
+def _get_cache_path_sft(data_path: str, max_length: int, system_message: str) -> str:
+    """
+    生成SFT数据集的缓存文件路径
+
+    Args:
+        data_path: 数据路径
+        max_length: 最大长度参数
+        system_message: 系统消息（影响tokenize结果）
+
+    Returns:
+        缓存文件路径
+    """
+    # 确保缓存目录存在
+    os.makedirs(TOKENIZER_CACHE_DIR, exist_ok=True)
+
+    # 规范化路径
+    abs_path = os.path.abspath(data_path)
+
+    # 创建包含所有参数的hash
+    safe_name = abs_path.replace("/", "_").replace("\\", "_").replace(" ", "_")
+    safe_name = "".join(c if c.isalnum() or c in "_-" else "_" for c in safe_name)
+
+    # 包含system_message的hash
+    content_hash = hashlib.md5(f"{abs_path}_{max_length}_{system_message}".encode()).hexdigest()
+
+    if len(safe_name) > 100:
+        safe_name = content_hash[:16]
+
+    cache_filename = f"sft_{safe_name}_{content_hash[:8]}_maxlen{max_length}.pt"
+    return os.path.join(TOKENIZER_CACHE_DIR, cache_filename)
+
+
+def _normalize_to_conversations(data: Dict[str, Any], is_eval: bool = False) -> Dict[str, Any]:
+    """
+    将输入样本规范化为包含 conversations 的字典，并做基础校验。
+
+    支持：
+    - 已有 conversations
+    - 仅有 text（转为双轮对话，沿用 TREX 逻辑）
+    - conversations 若为 JSON 字符串也会尝试解析
+    
+    参数:
+        data: 输入数据字典
+        is_eval: 是否为评估数据。如果是评估数据且是 TREX 格式，会生成更合理的问题
+    """
+    if not isinstance(data, dict):
+        raise ValueError("样本必须是字典类型")
+
+    # TREX 格式：只有 text，没有 conversations
+    if "text" in data and "conversations" not in data:
+        text = str(data["text"]).replace("<|im_start|>", "").replace("<|im_end|>", "").strip()
+        
+        if is_eval:
+            # 评估数据：从文档中提取关键信息作为问题
+            # 对于 TREX 格式的评估数据，我们需要生成一个合理的问题
+            # 策略：提取文档的第一句话或关键实体，生成 "What is X?" 格式的问题
+            
+            # 提取第一句话（到第一个句号）
+            first_sentence = text.split('.')[0].strip() if '.' in text else text[:200].strip()
+            
+            # 提取关键主题词（通常是第一个名词短语）
+            words = first_sentence.split()
+            
+            # 移除常见的停用词和标点
+            stop_words = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being'}
+            meaningful_words = [w.strip('.,!?;:()[]{}"\'') for w in words if w.lower() not in stop_words and len(w) > 2]
+            
+            if len(meaningful_words) > 0:
+                # 提取前2-4个有意义的词作为主题
+                topic = ' '.join(meaningful_words[:min(4, len(meaningful_words))])
+                # 生成问题："What is [topic]?"
+                question = f"What is {topic}?"
+            else:
+                # 如果无法提取主题，使用通用问题
+                # 但将文档的第一句话作为上下文
+                if len(first_sentence) > 10:
+                    question = f"Please explain: {first_sentence[:150]}"
+                else:
+                    question = "Please summarize the following content."
+            
+            data = {
+                "conversations": [
+                    {"role": "user", "content": question},
+                    {"role": "assistant", "content": text},
+                ]
+            }
+        else:
+            # 训练数据：保持原有逻辑
+            data = {
+                "conversations": [
+                    {"role": "user", "content": "请根据以下内容回答问题。"},
+                    {"role": "assistant", "content": text},
+                ]
+            }
+
+    if "conversations" not in data:
+        raise ValueError("缺少conversations字段")
+
+    conversations = data["conversations"]
+    # 允许字符串形式（如存成 JSON 字符串）
+    if isinstance(conversations, str):
+        conversations = json.loads(conversations)
+
+    if not isinstance(conversations, list):
+        raise ValueError("conversations必须是列表类型")
+    if len(conversations) == 0:
+        raise ValueError("conversations不能为空列表")
+
+    for turn_idx, turn in enumerate(conversations):
+        if not isinstance(turn, dict):
+            raise ValueError(f"第{turn_idx}轮对话必须是字典类型")
+        if "content" not in turn:
+            raise ValueError(f"第{turn_idx}轮对话缺少content字段")
+        if "role" in turn and turn["role"] not in ["user", "assistant", "system"]:
+            raise ValueError("role必须是user/assistant/system")
+
+    return {"conversations": conversations}
 
 
 class SFTDataset(Dataset):
@@ -62,10 +185,6 @@ class SFTDataset(Dataset):
         """
         super().__init__()
 
-        # 文件存在性检查
-        if not os.path.exists(jsonl_path):
-            raise FileNotFoundError(f"数据文件不存在: {jsonl_path}")
-
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.system_message = system_message
@@ -83,6 +202,68 @@ class SFTDataset(Dataset):
                 raise ValueError("tokenizer必须定义bos_token或pad_token")
         if tokenizer.eos_token is None:
             raise ValueError("tokenizer必须定义eos_token")
+
+        # 检查缓存
+        cache_path = _get_cache_path_sft(jsonl_path, max_length, system_message)
+
+        if os.path.exists(cache_path):
+            # 从缓存加载
+            print(f"从缓存加载 SFT tokenized 数据: {cache_path}")
+            try:
+                cached_data = torch.load(cache_path, map_location='cpu')
+                self.input_id_seqs = cached_data['input_id_seqs']
+                self.target_seqs = cached_data['target_seqs']
+                self.loss_masks = cached_data['loss_masks']
+                self.prompt_texts = cached_data['prompt_texts']
+                print(f"成功加载 {len(self.input_id_seqs)} 个 SFT tokenized 样本")
+                return
+            except Exception as e:
+                print(f"警告: 加载SFT缓存失败 ({e})，将重新 tokenize")
+
+        # 预tokenize所有样本为 token id 序列
+        print(f"开始 tokenize {len(self.samples)} 个 SFT 样本...")
+        self.input_id_seqs: List[torch.Tensor] = []  # X: input_ids[:-1]
+        self.target_seqs: List[torch.Tensor] = []    # Y: input_ids[1:]
+        self.loss_masks: List[torch.Tensor] = []
+        self.prompt_texts: List[str] = []
+
+        for sample in self.samples:
+            # 构建prompt
+            prompt = self._create_chat_prompt(sample['conversations'])
+
+            # 编码和截断
+            input_ids = self.tokenizer(prompt).input_ids[:self.max_length]
+
+            # padding到固定长度
+            padding_length = self.max_length - len(input_ids)
+            input_ids += [self.tokenizer.pad_token_id] * padding_length
+
+            # 生成损失掩码
+            loss_mask = self._generate_loss_mask(input_ids)
+
+            # 构建训练对
+            X = torch.tensor(input_ids[:-1], dtype=torch.long)  # 输入序列
+            Y = torch.tensor(input_ids[1:], dtype=torch.long)   # 目标序列（右移一位）
+            loss_mask_tensor = torch.tensor(loss_mask[1:], dtype=torch.long)
+
+            self.input_id_seqs.append(X)
+            self.target_seqs.append(Y)
+            self.loss_masks.append(loss_mask_tensor)
+            self.prompt_texts.append(prompt)
+
+        # 保存缓存
+        print(f"SFT Tokenize 完成，保存缓存到: {cache_path}")
+        try:
+            cache_data = {
+                'input_id_seqs': self.input_id_seqs,
+                'target_seqs': self.target_seqs,
+                'loss_masks': self.loss_masks,
+                'prompt_texts': self.prompt_texts
+            }
+            torch.save(cache_data, cache_path)
+            print(f"SFT缓存保存成功: {len(self.input_id_seqs)} 个样本")
+        except Exception as e:
+            print(f"警告: 保存SFT缓存失败 ({e})")
 
     def _encode_special_token(self, token: str) -> List[int]:
         """
@@ -103,72 +284,34 @@ class SFTDataset(Dataset):
         # 确保返回列表格式
         return token_ids if isinstance(token_ids, list) else [token_ids]
 
+    def _detect_format(self, path: str) -> str:
+        lower = path.lower()
+        if lower.endswith(".parquet") or "*" in path or "," in path or os.path.isdir(path):
+            return "parquet"
+        return "jsonl"
+
     def _load_data(self, path: str) -> List[Dict[str, Any]]:
         """
-        从JSONL文件加载数据并进行验证
-
-        支持两种格式：
-        1. 对话格式：包含 'conversations' 字段
-        2. TREX格式：包含 'text' 字段（自动转换为对话格式）
-
-        参数:
-            path: 数据文件路径
-
-        返回:
-            验证通过的样本列表（统一为对话格式）
+        自动检测 JSONL / Parquet 读取：
+        - JSONL：原有行读取逻辑
+        - Parquet：支持单/多文件（逗号、通配符、目录），列自适应映射
         """
+        if self._detect_format(path) == "parquet":
+            return self._load_parquet(path)
+        return self._load_jsonl(path)
+
+    def _load_jsonl(self, path: str) -> List[Dict[str, Any]]:
+        """JSONL 按行读取并校验。"""
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"数据文件不存在: {path}")
         samples = []
         skipped_count = 0
         with open(path, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f, 1):
                 try:
                     data = json.loads(line.strip())
-
-                    # 验证数据格式
-                    if not isinstance(data, dict):
-                        raise ValueError("样本必须是字典类型")
-
-                    # 检查是否为TREX格式（包含text字段但不包含conversations）
-                    if 'text' in data and 'conversations' not in data:
-                        # TREX格式：将text字段转换为对话格式
-                        text = data['text']
-                        # 简单处理：将text作为assistant的回复，创建一个简单的对话
-                        converted_data = {
-                            'conversations': [
-                                {
-                                    'role': 'user',
-                                    'content': '请根据以下内容回答问题。'
-                                },
-                                {
-                                    'role': 'assistant',
-                                    'content': text.replace('<|im_start|>', '').replace('<|im_end|>', '').strip()
-                                }
-                            ]
-                        }
-                        data = converted_data
-
-                    if 'conversations' not in data:
-                        raise ValueError("缺少conversations字段")
-
-                    if not isinstance(data['conversations'], list):
-                        raise ValueError("conversations必须是列表类型")
-
-                    # 检查空对话列表
-                    if len(data['conversations']) == 0:
-                        raise ValueError("conversations不能为空列表")
-
-                    # 验证每轮对话
-                    for turn_idx, turn in enumerate(data['conversations']):
-                        if not isinstance(turn, dict):
-                            raise ValueError(f"第{turn_idx}轮对话必须是字典类型")
-                        if 'content' not in turn:
-                            raise ValueError(f"第{turn_idx}轮对话缺少content字段")
-
-                        # 验证role字段（如果存在）
-                        if 'role' in turn and turn['role'] not in ['user', 'assistant', 'system']:
-                            raise ValueError(f"第{turn_idx}轮对话role必须是user/assistant/system")
-
-                    samples.append(data)
+                    normalized = _normalize_to_conversations(data)
+                    samples.append(normalized)
 
                 except Exception as e:
                     skipped_count += 1
@@ -177,6 +320,95 @@ class SFTDataset(Dataset):
                     continue
 
         print(f"成功加载 {len(samples)} 个训练样本")
+        if skipped_count > 20:
+            print(f"[警告] 还有 {skipped_count - 20} 个样本被跳过")
+        return samples
+
+    def _load_parquet(self, path: str) -> List[Dict[str, Any]]:
+        """Parquet 读取（支持逗号/通配符/目录，多文件自动聚合）。"""
+        try:
+            import pyarrow.dataset as ds  # type: ignore
+        except ImportError as e:
+            raise ImportError("需要安装 pyarrow 才能读取 Parquet：pip install pyarrow") from e
+
+        import os
+        import glob
+        
+        # 逗号分隔的多路径处理
+        path_list = [p.strip() for p in path.split(",") if p.strip()]
+        if not path_list:
+            raise FileNotFoundError(f"无效的数据路径: {path}")
+        
+        # 展开所有路径：如果是目录，列出其中的所有 parquet 文件
+        expanded_paths = []
+        for p in path_list:
+            if os.path.isdir(p):
+                # 目录：列出所有 .parquet 文件
+                parquet_files = glob.glob(os.path.join(p, "*.parquet"))
+                if not parquet_files:
+                    raise FileNotFoundError(f"目录中没有找到 Parquet 文件: {p}")
+                expanded_paths.extend(sorted(parquet_files))
+            elif os.path.isfile(p):
+                # 文件：直接添加
+                expanded_paths.append(p)
+            else:
+                # 可能是通配符模式
+                matched = glob.glob(p)
+                if not matched:
+                    raise FileNotFoundError(f"路径不存在或没有匹配的文件: {p}")
+                expanded_paths.extend(sorted(matched))
+        
+        if not expanded_paths:
+            raise FileNotFoundError(f"没有找到任何 Parquet 文件: {path}")
+
+        dataset = ds.dataset(expanded_paths, format="parquet")
+        schema_names = set(dataset.schema.names)
+
+        has_conv = "conversations" in schema_names
+        has_text = "text" in schema_names
+        has_pair = "user" in schema_names and "assistant" in schema_names
+
+        if has_conv:
+            columns = ["conversations"]
+        elif has_text:
+            columns = ["text"]
+        elif has_pair:
+            columns = ["user", "assistant"]
+        else:
+            raise ValueError("Parquet 缺少 conversations/text 或 user+assistant 列，无法构造对话")
+
+        table = dataset.to_table(columns=columns)
+
+        samples: List[Dict[str, Any]] = []
+        skipped_count = 0
+
+        for idx, row in enumerate(table.to_pylist(), 1):
+            try:
+                if has_conv:
+                    conv = row.get("conversations")
+                    normalized = _normalize_to_conversations({"conversations": conv})
+                elif has_text:
+                    text = row.get("text", "")
+                    normalized = _normalize_to_conversations({"text": text})
+                else:  # user + assistant
+                    user = row.get("user", "")
+                    assistant = row.get("assistant", "")
+                    normalized = _normalize_to_conversations(
+                        {
+                            "conversations": [
+                                {"role": "user", "content": str(user)},
+                                {"role": "assistant", "content": str(assistant)},
+                            ]
+                        }
+                    )
+                samples.append(normalized)
+            except Exception as e:
+                skipped_count += 1
+                if skipped_count <= 20:
+                    print(f"[警告] 跳过第{idx}行: {e}")
+                continue
+
+        print(f"成功加载 {len(samples)} 个训练样本（Parquet）")
         if skipped_count > 20:
             print(f"[警告] 还有 {skipped_count - 20} 个样本被跳过")
         return samples
@@ -332,47 +564,31 @@ class SFTDataset(Dataset):
         """返回数据集大小"""
         return len(self.samples)
 
-    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, str]:
         """
-        获取单个训练样本
+        获取单个训练样本（从预缓存数据中返回）
 
         参数:
             index: 样本索引
 
         返回:
-            (X, Y, loss_mask)元组:
+            (X, Y, loss_mask, prompt_text)元组:
             - X: 输入序列 (max_length-1,)
             - Y: 目标序列 (max_length-1,)，相对于X右移一位
             - loss_mask: 损失掩码 (max_length-1,)
-
-        异常:
-            在处理失败时会打印错误信息并重新抛出异常
+            - prompt_text: 原始prompt文本（用于知识提取，无需解码）
         """
         try:
-            sample = self.samples[index]
+            # 从缓存的数据中直接返回
+            X = self.input_id_seqs[index]
+            Y = self.target_seqs[index]
+            loss_mask = self.loss_masks[index]
+            prompt_text = self.prompt_texts[index]
 
-            # 第一阶段：构建prompt
-            prompt = self._create_chat_prompt(sample['conversations'])
-
-            # 第二阶段：编码和截断
-            input_ids = self.tokenizer(prompt).input_ids[:self.max_length]
-
-            # 第三阶段：padding到固定长度
-            padding_length = self.max_length - len(input_ids)
-            input_ids += [self.tokenizer.pad_token_id] * padding_length
-
-            # 第四阶段：生成损失掩码
-            loss_mask = self._generate_loss_mask(input_ids)
-
-            # 第五阶段：构建训练对（input右移得到target）
-            X = torch.tensor(input_ids[:-1], dtype=torch.long)
-            Y = torch.tensor(input_ids[1:], dtype=torch.long)
-            loss_mask_tensor = torch.tensor(loss_mask[1:], dtype=torch.long)
-
-            return X, Y, loss_mask_tensor
+            return X, Y, loss_mask, prompt_text
 
         except Exception as e:
-            print(f"[错误] 处理样本 {index} 失败: {e}")
+            print(f"[错误] 获取缓存样本 {index} 失败: {e}")
             raise
 
 
@@ -388,7 +604,7 @@ class SFTEvalDataset(Dataset):
     def __init__(
         self,
         jsonl_path: str,
-        system_message: str = "You are MiniMind, a helpful artificial intelligence assistant."
+        system_message: str = "You are a helpful artificial intelligence assistant."
     ) -> None:
         """
         初始化评估数据集
@@ -399,74 +615,36 @@ class SFTEvalDataset(Dataset):
         """
         super().__init__()
 
-        # 文件存在性检查
-        if not os.path.exists(jsonl_path):
-            raise FileNotFoundError(f"数据文件不存在: {jsonl_path}")
-
         self.system_message = system_message
         self.samples = self._load_data(jsonl_path)
 
+    def _detect_format(self, path: str) -> str:
+        lower = path.lower()
+        if lower.endswith(".parquet") or "*" in path or "," in path or os.path.isdir(path):
+            return "parquet"
+        return "jsonl"
+
     def _load_data(self, path: str) -> List[Dict[str, Any]]:
-        """
-        从JSONL文件加载评估数据
+        """自动检测 JSONL / Parquet 进行评估集加载。"""
+        if self._detect_format(path) == "parquet":
+            return self._load_parquet(path)
+        return self._load_jsonl(path)
 
-        支持两种数据格式：
-        1. 对话格式：包含 'conversations' 字段
-        2. TREX格式：包含 'text' 字段（自动转换为对话格式）
+    def _load_jsonl(self, path: str) -> List[Dict[str, Any]]:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"数据文件不存在: {path}")
 
-        参数:
-            path: 数据文件路径（JSONL格式，每行一个JSON对象）
-
-        返回:
-            样本列表（统一为对话格式）
-        """
         samples = []
         skipped_count = 0
-        
         with open(path, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f, 1):
-                # 跳过空行
                 line = line.strip()
                 if not line:
                     continue
-                
                 try:
                     data = json.loads(line)
-                    
-                    # 确保解析结果是字典
-                    if not isinstance(data, dict):
-                        skipped_count += 1
-                        if skipped_count <= 20:
-                            print(f"[警告] 跳过第{line_num}行: 不是字典类型 (type: {type(data).__name__})")
-                        continue
-                    
-                    # 检查是否为TREX格式（包含text字段但不包含conversations）
-                    if 'text' in data and 'conversations' not in data:
-                        # TREX格式：将text字段转换为对话格式
-                        # TREX格式的text通常是完整的对话文本，包含<|im_start|>和<|im_end|>标记
-                        text = data['text']
-                        # 简单处理：将text作为assistant的回复，创建一个简单的对话
-                        converted_data = {
-                            'conversations': [
-                                {
-                                    'role': 'user',
-                                    'content': '请根据以下内容回答问题。'
-                                },
-                                {
-                                    'role': 'assistant',
-                                    'content': text.replace('<|im_start|>', '').replace('<|im_end|>', '').strip()
-                                }
-                            ]
-                        }
-                        samples.append(converted_data)
-                    elif 'conversations' in data:
-                        # 标准对话格式
-                        samples.append(data)
-                    else:
-                        skipped_count += 1
-                        if skipped_count <= 20:  # 只显示前20个警告
-                            print(f"[警告] 跳过第{line_num}行: 缺少conversations或text字段")
-                        continue
+                    normalized = _normalize_to_conversations(data, is_eval=True)
+                    samples.append(normalized)
                 except Exception as e:
                     skipped_count += 1
                     if skipped_count <= 20:
@@ -474,6 +652,69 @@ class SFTEvalDataset(Dataset):
                     continue
 
         print(f"成功加载 {len(samples)} 个评估样本")
+        if skipped_count > 20:
+            print(f"[警告] 还有 {skipped_count - 20} 个样本被跳过")
+        return samples
+
+    def _load_parquet(self, path: str) -> List[Dict[str, Any]]:
+        try:
+            import pyarrow.dataset as ds  # type: ignore
+        except ImportError as e:
+            raise ImportError("需要安装 pyarrow 才能读取 Parquet：pip install pyarrow") from e
+
+        path_list = [p.strip() for p in path.split(",") if p.strip()]
+        if not path_list:
+            raise FileNotFoundError(f"无效的数据路径: {path}")
+
+        dataset = ds.dataset(path_list, format="parquet")
+        schema_names = set(dataset.schema.names)
+
+        has_conv = "conversations" in schema_names
+        has_text = "text" in schema_names
+        has_pair = "user" in schema_names and "assistant" in schema_names
+
+        if has_conv:
+            columns = ["conversations"]
+        elif has_text:
+            columns = ["text"]
+        elif has_pair:
+            columns = ["user", "assistant"]
+        else:
+            raise ValueError("Parquet 缺少 conversations/text 或 user+assistant 列，无法构造对话")
+
+        table = dataset.to_table(columns=columns)
+
+        samples: List[Dict[str, Any]] = []
+        skipped_count = 0
+
+        for idx, row in enumerate(table.to_pylist(), 1):
+            try:
+                if has_conv:
+                    conv = row.get("conversations")
+                    normalized = _normalize_to_conversations({"conversations": conv}, is_eval=True)
+                elif has_text:
+                    text = row.get("text", "")
+                    normalized = _normalize_to_conversations({"text": text}, is_eval=True)
+                else:
+                    user = row.get("user", "")
+                    assistant = row.get("assistant", "")
+                    normalized = _normalize_to_conversations(
+                        {
+                            "conversations": [
+                                {"role": "user", "content": str(user)},
+                                {"role": "assistant", "content": str(assistant)},
+                            ]
+                        },
+                        is_eval=True
+                    )
+                samples.append(normalized)
+            except Exception as e:
+                skipped_count += 1
+                if skipped_count <= 20:
+                    print(f"[警告] 跳过第{idx}行: {e}")
+                continue
+
+        print(f"成功加载 {len(samples)} 个评估样本（Parquet）")
         if skipped_count > 20:
             print(f"[警告] 还有 {skipped_count - 20} 个样本被跳过")
         return samples
@@ -537,6 +778,30 @@ class SFTEvalDataset(Dataset):
 #########################################################
 
 
+def _sft_collate_fn(batch):
+    """
+    自定义 collate 函数，处理混合类型（tensor + string）
+    
+    输入:
+        batch: List[Tuple[X, Y, loss_mask, prompt_text]]
+    
+    返回:
+        (X_batch, Y_batch, loss_mask_batch, prompt_texts)
+        - X_batch, Y_batch, loss_mask_batch: [batch_size, max_length-1]
+        - prompt_texts: List[str] (batch_size,)
+    """
+    # 分离各个组件
+    X_list, Y_list, loss_mask_list, prompt_texts = zip(*batch)
+    
+    # 堆叠 tensor
+    X_batch = torch.stack(X_list, dim=0)
+    Y_batch = torch.stack(Y_list, dim=0)
+    loss_mask_batch = torch.stack(loss_mask_list, dim=0)
+    
+    # prompt_texts 保持为列表
+    return X_batch, Y_batch, loss_mask_batch, list(prompt_texts)
+
+
 def create_sft_dataloader(
     data_path: str,
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
@@ -575,9 +840,10 @@ def create_sft_dataloader(
             system_message="You are a helpful assistant."
         )
 
-        for batch_idx, (X, Y, loss_mask) in enumerate(train_loader):
+        for batch_idx, (X, Y, loss_mask, prompt_texts) in enumerate(train_loader):
             # X, Y, loss_mask: [batch_size, max_length-1]
             # loss_mask中只有assistant回复部分为1
+            # prompt_texts: List[str] (batch_size,)，原始prompt文本
             ...
         ```
     """
@@ -597,7 +863,8 @@ def create_sft_dataloader(
         pin_memory=pin_memory,
         drop_last=True,
         persistent_workers=False,
-        prefetch_factor=2 if num_workers > 0 else None
+        prefetch_factor=2 if num_workers > 0 else None,
+        collate_fn=_sft_collate_fn  # 使用自定义 collate_fn 处理混合类型
     )
 
     return dataloader
@@ -642,8 +909,9 @@ def create_sft_validation_dataloader(
         )
 
         if val_loader is not None:
-            for batch_idx, (X, Y, loss_mask) in enumerate(val_loader):
+            for batch_idx, (X, Y, loss_mask, prompt_texts) in enumerate(val_loader):
                 # X, Y, loss_mask: [batch_size, max_length-1]
+                # prompt_texts: List[str] (batch_size,)，原始prompt文本
                 ...
         ```
     """
@@ -671,7 +939,8 @@ def create_sft_validation_dataloader(
         shuffle=False,
         num_workers=0,
         pin_memory=pin_memory,
-        drop_last=False
+        drop_last=False,
+        collate_fn=_sft_collate_fn  # 使用自定义 collate_fn 处理混合类型
     )
 
     return dataloader

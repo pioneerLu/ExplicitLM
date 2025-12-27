@@ -55,12 +55,24 @@ class FactExtractor:
                 f"请运行 bert/get_model.py 下载模型"
             )
         
-        print(f"加载 LLMLingua 模型: {self.model_path}")
         self.compressor = PromptCompressor(
             model_name=self.model_path,
             use_llmlingua2=True
         )
-        print("LLMLingua 模型加载完成")
+        # 修复NotImplementedError: is_begin_of_new_word函数需要识别模型名称
+        if hasattr(self.compressor, 'model_name'):
+            model_name_str = str(self.compressor.model_name).lower()
+            if 'bert-base-multilingual-cased' not in model_name_str and 'xlm-roberta-large' not in model_name_str:
+                import json
+                config_path = os.path.join(self.model_path, 'config.json')
+                if os.path.exists(config_path):
+                    try:
+                        with open(config_path) as f:
+                            config = json.load(f)
+                            if config.get('model_type', '').lower() == 'bert':
+                                self.compressor.model_name = 'bert-base-multilingual-cased'
+                    except Exception:
+                        pass
     
     def extract_facts(
         self,
@@ -93,8 +105,27 @@ class FactExtractor:
             }
         
         try:
+            # compress_prompt_llmlingua2 需要 context 参数为 List[str]，而不是单个字符串
+            # 将文本按句子分割成列表
+            import re
+            # 按句子分割文本
+            sentences = re.split(r'([.!?]\s+)', text)
+            # 重新组合句子（保留分隔符）
+            context_list = []
+            for i in range(0, len(sentences), 2):
+                if i < len(sentences):
+                    sentence = sentences[i]
+                    if i + 1 < len(sentences):
+                        sentence += sentences[i + 1]
+                    if sentence.strip():
+                        context_list.append(sentence.strip())
+            
+            # 如果没有分割出句子，使用整个文本
+            if not context_list:
+                context_list = [text]
+            
             results = self.compressor.compress_prompt_llmlingua2(
-                text,
+                context_list,  # 传入字符串列表
                 rate=self.compression_rate,
                 force_tokens=self.force_tokens,
                 chunk_end_tokens=self.chunk_end_tokens,
@@ -115,22 +146,22 @@ class FactExtractor:
                             word, label = parts
                             annotations.append((word, '+' if label == '1' else '-'))
             
+            # compress_prompt_llmlingua2 返回的 compressed_prompt 
+            compressed_prompt = results.get('compressed_prompt', '')
+            if isinstance(compressed_prompt, list):
+                compressed_text = ' '.join(compressed_prompt)
+            else:
+                compressed_text = str(compressed_prompt) if compressed_prompt else ''
+            
             return {
-                'compressed_text': results.get('compressed_prompt', ''),
+                'compressed_text': compressed_text,
                 'original_tokens': results.get('origin_tokens', 0),
                 'compressed_tokens': results.get('compressed_tokens', 0),
                 'compression_ratio': results.get('rate', 0.0),
                 'annotations': annotations,
             }
         except Exception as e:
-            print(f"警告: 事实提取失败: {e}")
-            return {
-                'compressed_text': text,
-                'original_tokens': len(text.split()),
-                'compressed_tokens': len(text.split()),
-                'compression_ratio': 1.0,
-                'annotations': [],
-            }
+            raise RuntimeError(f"LLMLingua提取失败: {e}") from e
     
     def extract_facts_batch(
         self,

@@ -33,30 +33,48 @@ class MemoryBankProcessor:
         knowledge_num: int,
         knowledge_length: int,
         recompute: bool = False,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        处理记忆库数据，返回 memory_bank 和 valid_mask
+        
+        Returns:
+            (memory_bank_tensor, valid_mask_tensor)
+        """
         if not recompute and os.path.exists(cache_path):
             Logger(f"从缓存加载memory_bank初始化数据: {cache_path}")
-            processed_tensor = torch.load(cache_path)
-            Logger(f"加载的memory_bank数据形状: {processed_tensor.shape}")
-            return processed_tensor
+            cache_data = torch.load(cache_path)
+            
+            # 兼容旧格式：如果是 tensor，则 valid_mask 全为 True
+            if isinstance(cache_data, dict):
+                processed_tensor = cache_data["memory_bank"]
+                valid_mask = cache_data.get("valid_mask", torch.ones(processed_tensor.shape[0], dtype=torch.bool))
+                Logger(f"加载的memory_bank数据形状: {processed_tensor.shape}")
+                Logger(f"有效条目数: {valid_mask.sum().item()}/{valid_mask.shape[0]}")
+            else:
+                # 旧格式：直接是 tensor
+                processed_tensor = cache_data
+                valid_mask = torch.ones(processed_tensor.shape[0], dtype=torch.bool)
+                Logger(f"加载的memory_bank数据形状: {processed_tensor.shape} (旧格式，假设全有效)")
+            return processed_tensor, valid_mask
+        
         Logger(f"处理文本数据用于memory_bank初始化: {database_path}")
         with open(database_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         Logger(f"从 {database_path} 加载了 {len(data)} 条句子")
-        processed_tensor, database_mapping = self._process_memory_sentences(
+        processed_tensor, database_mapping, valid_mask = self._process_memory_sentences(
             data, knowledge_num, knowledge_length
         )
         self._save_memory_cache(
-            processed_tensor, database_mapping, cache_path, database_path
+            processed_tensor, valid_mask, database_mapping, cache_path, database_path
         )
-        return processed_tensor
+        return processed_tensor, valid_mask
 
     def _process_memory_sentences(
         self,
         data: List,
         knowledge_num: int,
         knowledge_length: int,
-    ) -> Tuple[torch.Tensor, List[Dict]]:
+    ) -> Tuple[torch.Tensor, List[Dict], torch.Tensor]:
         processed_rows = []
         database_mapping = []
         total_sentences = len(data)
@@ -116,14 +134,21 @@ class MemoryBankProcessor:
                         "processing_error": str(e),
                     }
                 )
+        num_valid = len(processed_rows)
         while len(processed_rows) < knowledge_num:
             processed_rows.append([self.pad_token_id] * knowledge_length)
         processed_tensor = torch.tensor(processed_rows, dtype=torch.long)
+        
+        # 生成 valid_mask：前 num_valid 个条目是有效的
+        valid_mask = torch.zeros(knowledge_num, dtype=torch.bool)
+        valid_mask[:num_valid] = True
+        
         self._log_memory_statistics(
             total_sentences, truncated_sentences, num_to_process,
             knowledge_num, knowledge_length, processed_tensor.shape
         )
-        return processed_tensor, database_mapping
+        Logger(f"有效条目数: {num_valid}/{knowledge_num} ({num_valid/knowledge_num*100:.2f}%)")
+        return processed_tensor, database_mapping, valid_mask
 
     def _extract_sentence_info(self, item: Any) -> Dict[str, str]:
         if isinstance(item, dict):
@@ -176,13 +201,21 @@ class MemoryBankProcessor:
     def _save_memory_cache(
         self,
         processed_tensor: torch.Tensor,
+        valid_mask: torch.Tensor,
         database_mapping: List[Dict],
         cache_path: str,
         database_path: str,
     ) -> None:
         try:
-            torch.save(processed_tensor, cache_path)
+            # 保存为字典格式，包含 memory_bank 和 valid_mask
+            cache_data = {
+                "memory_bank": processed_tensor,
+                "valid_mask": valid_mask,
+            }
+            torch.save(cache_data, cache_path)
             Logger(f"处理结果已保存到: {cache_path}")
+            Logger(f"  - memory_bank 形状: {processed_tensor.shape}")
+            Logger(f"  - valid_mask 形状: {valid_mask.shape}, 有效条目: {valid_mask.sum().item()}")
         except Exception as e:
             Logger(f"保存处理结果失败: {e}")
         try:
@@ -234,8 +267,10 @@ def _init_qwen3_model(args: dict, accelerator=None):
     if qwen3_model_path is None:
         raise ValueError("必须指定qwen3_model_path参数，指向Qwen3-4B预训练模型路径")
     
-    database_init_path = args.get("database_init_path", None)
-    cache_path = args.get("cache_path", "cache/knowledge_cache.pt")
+    # 统一使用 cache_path，兼容旧的 database_init_path 参数
+    cache_path = args.get("cache_path", None)
+    if not cache_path:
+        cache_path = args.get("database_init_path", None)  # 兼容旧参数
     recompute_cache = args.get("recompute_cache", False)
 
     Logger("开始模型初始化流程（Qwen3架构）", accelerator)
@@ -246,15 +281,16 @@ def _init_qwen3_model(args: dict, accelerator=None):
     memory_cfg = {
         "knowledge_num": args.get("knowledge_num", 1024 * 1024),
         "knowledge_length": args.get("knowledge_length", 16),
-        "knowledge_dim": args.get("knowledge_dim", 128),
+        # knowledge_dim 已移除，不再使用（兼容性保留，但会被忽略）
         "num_candidates": args.get("num_candidates", 16),
         "num_selected": args.get("num_selected", 1),
         "gumbel_temperature": args.get("gumbel_temperature", 1.0),
         "use_moe": args.get("use_moe", False),
         "dropout": args.get("dropout", 0.0),
-        # LoRA 配置
-        "gate_rank": args.get("gate_rank", None),
-        "fusion_rank": args.get("fusion_rank", None),
+        # New MemoryGate configuration
+        "query_dim": args.get("query_dim", 1024),
+        "key_proj_dim": args.get("key_proj_dim", 512),
+        "temperature": args.get("temperature", 0.1),
     }
     
     # 如果配置中指定了 keys_path，添加到 memory_cfg
@@ -391,26 +427,52 @@ def _init_qwen3_model(args: dict, accelerator=None):
     use_moe = memory_cfg.get("use_moe", False)
     if use_moe:
         Logger("MOE 模式：跳过记忆库初始化", accelerator)
-    elif database_init_path:
-        Logger(f"  - 数据库路径: {database_init_path}", accelerator)
-        Logger(f"  - 缓存路径: {cache_path}", accelerator)
+    elif cache_path and os.path.exists(cache_path):
+        # 统一使用 cache_path，根据文件扩展名自动判断处理方式
+        Logger(f"  - 记忆库路径: {cache_path}", accelerator)
         Logger(f"  - 知识库大小: {memory_cfg['knowledge_num']}", accelerator)
         Logger(f"  - 知识条目长度: {memory_cfg['knowledge_length']}", accelerator)
         
-        _initialize_database(
-            model=model,
-            tokenizer=tokenizer,
-            database_path=database_init_path,
-            cache_path=cache_path,
-            knowledge_num=memory_cfg["knowledge_num"],
-            knowledge_length=memory_cfg["knowledge_length"],
-            recompute=recompute_cache,
-            model_type="qwen3_explicitlm",
-            database_attribute="memory_bank",
-            accelerator=accelerator,
-        )
+        if cache_path.endswith('.pt'):
+            # .pt 文件：直接加载
+            Logger(f"  - 检测到 .pt 文件，直接加载", accelerator)
+            _load_from_cache_only(
+                model=model,
+                cache_path=cache_path,
+                knowledge_num=memory_cfg["knowledge_num"],
+                knowledge_length=memory_cfg["knowledge_length"],
+                database_attribute="memory_bank",
+                accelerator=accelerator,
+            )
+        elif cache_path.endswith('.json'):
+            # JSON 文件：处理后保存到同名的 .pt 文件
+            Logger(f"  - 检测到 .json 文件，将从 JSON 处理并保存", accelerator)
+            pt_cache_path = cache_path.replace('.json', '.pt')
+            _initialize_database(
+                model=model,
+                tokenizer=tokenizer,
+                database_path=cache_path,  # JSON 文件
+                cache_path=pt_cache_path,  # 生成的 .pt 文件
+                knowledge_num=memory_cfg["knowledge_num"],
+                knowledge_length=memory_cfg["knowledge_length"],
+                recompute=recompute_cache,
+                model_type="qwen3_explicitlm",
+                database_attribute="memory_bank",
+                accelerator=accelerator,
+            )
+        else:
+            # 默认当作 .pt 文件处理
+            Logger(f"  - 未识别文件类型，默认当作 .pt 文件处理", accelerator)
+            _load_from_cache_only(
+                model=model,
+                cache_path=cache_path,
+                knowledge_num=memory_cfg["knowledge_num"],
+                knowledge_length=memory_cfg["knowledge_length"],
+                database_attribute="memory_bank",
+                accelerator=accelerator,
+            )
     else:
-        Logger("警告: 未指定数据库初始化路径，记忆库将使用随机初始化", accelerator)
+        Logger("警告: 未指定记忆库路径或文件不存在，记忆库将使用随机初始化", accelerator)
 
     # 冻结Qwen主模型参数，只保留记忆库相关参数可训练
     Logger("🔒 冻结Qwen主模型参数...", accelerator)
@@ -579,30 +641,110 @@ def _initialize_database(
         Logger(f"错误: 数据库文件不存在: {database_path}", accelerator)
         raise FileNotFoundError(f"数据库文件不存在: {database_path}")
     
+    # 创建缓存目录（如果需要）
     cache_dir = os.path.dirname(cache_path)
     if cache_dir and not os.path.exists(cache_dir):
         os.makedirs(cache_dir, exist_ok=True)
     
-        processor = MemoryBankProcessor(tokenizer)
-        if not cache_path or cache_path == "cache/knowledge_cache.pt":
-            cache_path = f"cache/memory_bank_init_{knowledge_num}_{knowledge_length}.pt"
-        
-        start_time = time.time()
-        processed_tensor = processor.process_memory_bank(
-            database_path=database_path,
-            cache_path=cache_path,
-            knowledge_num=knowledge_num,
-            knowledge_length=knowledge_length,
-            recompute=recompute,
-        )
+    # 处理 memory bank（从 JSON 文件处理或从缓存加载）
+    processor = MemoryBankProcessor(tokenizer)
+    if not cache_path or cache_path == "cache/knowledge_cache.pt":
+        cache_path = f"cache/memory_bank_init_{knowledge_num}_{knowledge_length}.pt"
+    
+    start_time = time.time()
+    processed_tensor, valid_mask = processor.process_memory_bank(
+        database_path=database_path,
+        cache_path=cache_path,
+        knowledge_num=knowledge_num,
+        knowledge_length=knowledge_length,
+        recompute=recompute,
+    )
     
     if processed_tensor is None:
         raise ValueError("数据处理失败，返回的张量为None")
     
     _set_database_attribute(model, database_attribute, processed_tensor, accelerator)
     
+    # 设置 valid_mask
+    if hasattr(model, "valid_mask"):
+        model.valid_mask.data.copy_(valid_mask.cpu())
+        Logger(f"valid_mask 已设置: {valid_mask.sum().item()}/{valid_mask.shape[0]} 个有效条目", accelerator)
+    else:
+        Logger(f"警告: 模型没有 valid_mask 属性，跳过设置", accelerator)
+    
     total_time = time.time() - start_time
     Logger(f"记忆库初始化完成: {processed_tensor.shape[0]}条目, 耗时{total_time:.2f}秒", accelerator)
+
+
+def _load_from_cache_only(
+    model: nn.Module,
+    cache_path: str,
+    knowledge_num: int,
+    knowledge_length: int,
+    database_attribute: str,
+    accelerator=None,
+) -> None:
+    """
+    仅从缓存加载 memory bank（不处理数据库文件）
+    
+    Args:
+        model: 模型实例
+        cache_path: 缓存文件路径
+        knowledge_num: 知识库大小
+        knowledge_length: 知识条目长度
+        database_attribute: 数据库属性名（如 "memory_bank"）
+        accelerator: Accelerator 对象
+    """
+    if not os.path.exists(cache_path):
+        Logger(f"错误: 缓存文件不存在: {cache_path}", accelerator)
+        raise FileNotFoundError(f"缓存文件不存在: {cache_path}")
+    
+    Logger(f"从缓存加载 memory bank: {cache_path}", accelerator)
+    cache_data = torch.load(cache_path, map_location="cpu")
+    
+    # 兼容旧格式：如果是 tensor，则 valid_mask 全为 True
+    if isinstance(cache_data, dict):
+        processed_tensor = cache_data["memory_bank"]
+        valid_mask = cache_data.get("valid_mask", torch.ones(processed_tensor.shape[0], dtype=torch.bool))
+        Logger(f"加载的memory_bank数据形状: {processed_tensor.shape}")
+        Logger(f"有效条目数: {valid_mask.sum().item()}/{valid_mask.shape[0]}")
+    else:
+        # 旧格式：直接是 tensor
+        processed_tensor = cache_data
+        valid_mask = torch.ones(processed_tensor.shape[0], dtype=torch.bool)
+        Logger(f"加载的memory_bank数据形状: {processed_tensor.shape} (旧格式，假设全有效)")
+    
+    # 检查尺寸是否匹配
+    if processed_tensor.shape[0] != knowledge_num or processed_tensor.shape[1] != knowledge_length:
+        Logger(f"警告: 缓存尺寸不匹配。缓存: {processed_tensor.shape}, 期望: ({knowledge_num}, {knowledge_length})", accelerator)
+        Logger(f"将调整缓存数据以匹配期望尺寸", accelerator)
+        # 如果缓存更大，截取；如果更小，填充
+        if processed_tensor.shape[0] >= knowledge_num:
+            processed_tensor = processed_tensor[:knowledge_num]
+            valid_mask = valid_mask[:knowledge_num]
+        else:
+            # 填充到期望大小
+            pad_token_id = getattr(model.config, 'pad_token_id', 0) or 0
+            padding = torch.full(
+                (knowledge_num - processed_tensor.shape[0], knowledge_length),
+                pad_token_id,
+                dtype=processed_tensor.dtype
+            )
+            processed_tensor = torch.cat([processed_tensor, padding], dim=0)
+            # valid_mask 也需要填充
+            padding_mask = torch.zeros(knowledge_num - valid_mask.shape[0], dtype=torch.bool)
+            valid_mask = torch.cat([valid_mask, padding_mask], dim=0)
+    
+    _set_database_attribute(model, database_attribute, processed_tensor, accelerator)
+    
+    # 设置 valid_mask
+    if hasattr(model, "valid_mask"):
+        model.valid_mask.data.copy_(valid_mask.cpu())
+        Logger(f"valid_mask 已设置: {valid_mask.sum().item()}/{valid_mask.shape[0]} 个有效条目", accelerator)
+    else:
+        Logger(f"警告: 模型没有 valid_mask 属性，跳过设置", accelerator)
+    
+    Logger(f"从缓存加载 memory bank 完成: {processed_tensor.shape[0]}条目", accelerator)
 
 
 def _set_database_attribute(model: nn.Module, attribute_path: str, data: torch.Tensor, accelerator=None) -> None:

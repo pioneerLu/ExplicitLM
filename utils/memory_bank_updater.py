@@ -63,6 +63,14 @@ class MemoryBankUpdater:
         else:
             raise ValueError("模型没有 memory_bank 属性或 memory_bank 为 None")
         
+        # 获取 valid_mask（如果存在）
+        if hasattr(model, 'valid_mask') and model.valid_mask is not None:
+            self.valid_mask = model.valid_mask
+        else:
+            # 如果没有 valid_mask，默认所有条目都有效
+            self.valid_mask = torch.ones(self.knowledge_num, dtype=torch.bool)
+            Logger("警告: 模型没有 valid_mask，默认所有条目都有效", accelerator=None)
+        
         self.max_entries = max_entries or self.knowledge_num
         
         # 初始化使用统计（用于 LRU 策略）
@@ -75,7 +83,21 @@ class MemoryBankUpdater:
         # 初始化重要性评分（用于 importance 策略）
         self.importance_scores = torch.ones(self.knowledge_num, dtype=torch.float32)
         
-        Logger(f"记忆库更新器初始化完成: 策略={update_strategy}, 大小={self.knowledge_num}x{self.knowledge_length}")
+        Logger(f"记忆库更新器初始化完成: 策略={update_strategy}, 大小={self.knowledge_num}x{self.knowledge_length}, 有效条目={self.valid_mask.sum().item()}/{self.knowledge_num}")
+    
+    def record_access(self, indices: List[int]):
+        """
+        记录知识条目的访问（用于LRU策略）
+        
+        Args:
+            indices: 被访问的知识条目索引列表
+        """
+        with torch.no_grad():
+            for idx in indices:
+                if 0 <= idx < self.knowledge_num:
+                    self.usage_stats['last_used'][idx] = self.access_counter
+                    self.usage_stats['access_count'][idx] += 1
+            self.access_counter += 1
     
     def update_with_facts(
         self,
@@ -145,21 +167,54 @@ class MemoryBankUpdater:
                 )
                 update_indices.extend(additional_indices)
         
-        # 更新 memory_bank
+        # 统计更新信息（在更新前记录哪些是新槽位，哪些是替换）
+        num_new_slots = 0
+        is_new_slot = {}  # 记录每个索引是否是新槽位
+        if hasattr(self, 'valid_mask'):
+            for idx in update_indices:
+                if idx < self.knowledge_num:
+                    is_new = not self.valid_mask[idx].item()
+                    is_new_slot[idx] = is_new
+                    if is_new:
+                        num_new_slots += 1
+        else:
+            # 如果没有valid_mask，假设都是新槽位（实际上无法判断）
+            num_new_slots = 0
+            for idx in update_indices:
+                is_new_slot[idx] = False
+        
+        num_replaced = len(update_indices) - num_new_slots
+        
+        # 更新 memory_bank 和 valid_mask
         with torch.no_grad():
             for i, idx in enumerate(update_indices):
                 if 0 <= idx < self.knowledge_num:
-                    self.memory_bank[idx] = fact_tensor[i]
+                    # 更新 memory_bank（确保在CPU上）
+                    if self.memory_bank.device.type != 'cpu':
+                        # 如果memory_bank在GPU上，需要先移到CPU
+                        fact_tensor_cpu = fact_tensor[i].cpu()
+                        self.memory_bank[idx] = fact_tensor_cpu
+                    else:
+                        self.memory_bank[idx] = fact_tensor[i].cpu()
+                    
+                    # 更新 valid_mask（标记为有效）
+                    if hasattr(self, 'valid_mask'):
+                        self.valid_mask[idx] = True
+                    
                     # 更新使用统计
                     self.usage_stats['last_used'][idx] = self.access_counter
-                    self.usage_stats['access_count'][idx] += 1
+                    # 新条目或替换条目，访问次数都重置为1
+                    self.usage_stats['access_count'][idx] = 1
                     self.access_counter += 1
         
         return {
             "updated_count": len(update_indices),
-            "update_indices": update_indices[:10],  # 只返回前10个
+            "update_indices": update_indices,  # 返回所有更新的索引（用于追踪10%阈值）
             "facts_count": num_facts,
             "strategy": self.update_strategy,
+            "new_slots": num_new_slots,
+            "replaced_slots": num_replaced,
+            "valid_entries": self.valid_mask.sum().item() if hasattr(self, 'valid_mask') else self.knowledge_num,
         }
     
     def _select_update_indices(
@@ -167,22 +222,68 @@ class MemoryBankUpdater:
         num_indices: int,
         exclude_indices: Optional[List[int]] = None,
     ) -> List[int]:
-        """根据策略选择要更新的索引"""
+        """
+        根据策略选择要更新的索引
+        
+        策略：
+        1. 优先选择空槽位（valid_mask=False的条目）
+        2. 如果空槽位不足，根据update_strategy选择已使用的条目
+        """
         exclude_set = set(exclude_indices or [])
-        available_indices = [i for i in range(self.knowledge_num) if i not in exclude_set]
+        
+        # 获取空槽位（无效条目）
+        empty_slots = [
+            i for i in range(self.knowledge_num) 
+            if i not in exclude_set and not self.valid_mask[i].item()
+        ]
+        
+        # 获取已使用的条目（有效条目）
+        used_slots = [
+            i for i in range(self.knowledge_num) 
+            if i not in exclude_set and self.valid_mask[i].item()
+        ]
+        
+        selected_indices = []
+        
+        # 优先使用空槽位
+        num_empty_needed = min(num_indices, len(empty_slots))
+        selected_indices.extend(empty_slots[:num_empty_needed])
+        
+        # 如果还需要更多槽位，从已使用的条目中选择
+        num_remaining = num_indices - len(selected_indices)
+        if num_remaining > 0 and len(used_slots) > 0:
+            replacement_indices = self._select_replacement_indices(
+                num_remaining, 
+                used_slots,
+                exclude_set
+            )
+            selected_indices.extend(replacement_indices)
+        
+        return selected_indices[:num_indices]
+    
+    def _select_replacement_indices(
+        self,
+        num_indices: int,
+        candidate_indices: List[int],
+        exclude_indices: Optional[set] = None,
+    ) -> List[int]:
+        """从候选索引中选择要替换的索引（根据update_strategy）"""
+        exclude_set = exclude_indices or set()
+        available = [i for i in candidate_indices if i not in exclude_set]
         
         if self.update_strategy == "fifo":
             # 先进先出：选择最旧的条目（使用统计中最小的 last_used）
             sorted_indices = sorted(
-                available_indices,
+                available,
                 key=lambda i: self.usage_stats['last_used'][i].item()
             )
             return sorted_indices[:num_indices]
         
         elif self.update_strategy == "lru":
             # 最近最少使用：选择最久未使用的条目
+            # 优先选择 last_used 最小的，如果相同则选择 access_count 最小的
             sorted_indices = sorted(
-                available_indices,
+                available,
                 key=lambda i: (
                     self.usage_stats['last_used'][i].item(),
                     -self.usage_stats['access_count'][i].item()  # 访问次数少的优先
@@ -193,27 +294,30 @@ class MemoryBankUpdater:
         elif self.update_strategy == "random":
             # 随机选择
             import random
-            return random.sample(available_indices, min(num_indices, len(available_indices)))
+            return random.sample(available, min(num_indices, len(available)))
         
         elif self.update_strategy == "similarity":
             # 基于相似度：选择最相似的条目（需要计算embedding相似度）
             # 这里简化实现，使用随机选择
             import random
-            return random.sample(available_indices, min(num_indices, len(available_indices)))
+            return random.sample(available, min(num_indices, len(available)))
         
         elif self.update_strategy == "importance":
             # 基于重要性：选择重要性评分最低的条目
             sorted_indices = sorted(
-                available_indices,
+                available,
                 key=lambda i: self.importance_scores[i].item()
             )
             return sorted_indices[:num_indices]
         
         else:
-            # 默认使用 FIFO
+            # 默认使用 LRU（最不常用）
             sorted_indices = sorted(
-                available_indices,
-                key=lambda i: self.usage_stats['last_used'][i].item()
+                available,
+                key=lambda i: (
+                    self.usage_stats['last_used'][i].item(),
+                    -self.usage_stats['access_count'][i].item()
+                )
             )
             return sorted_indices[:num_indices]
     

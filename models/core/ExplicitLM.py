@@ -26,6 +26,7 @@ from transformers.utils import TransformersKwargs
 from typing import Unpack
 
 from models.core.Qwen3ExplicitLMBlock import Qwen3ExplicitLMBlock
+from models.memory_bank.MemoryGate import MemoryGate
 
 
 class ExplicitLM(PreTrainedModel):
@@ -58,8 +59,17 @@ class ExplicitLM(PreTrainedModel):
         
         self.rotary_emb = Qwen3RotaryEmbedding(config=qwen3_config)
         
+        # Create shared MemoryGate (all layers share the same gate)
+        use_moe = memory_cfg.get("use_moe", False)
+        if not use_moe:
+            memory_cfg_with_dim = memory_cfg.copy()
+            memory_cfg_with_dim["dim"] = qwen3_config.hidden_size
+            self.shared_memory_gate = MemoryGate(memory_cfg_with_dim)
+        else:
+            self.shared_memory_gate = None
+        
         self.layers = nn.ModuleList([
-            Qwen3ExplicitLMBlock(qwen3_config, layer_idx, memory_cfg)
+            Qwen3ExplicitLMBlock(qwen3_config, layer_idx, memory_cfg, shared_memory_gate=self.shared_memory_gate)
             for layer_idx in range(qwen3_config.num_hidden_layers)
         ])
         
@@ -83,8 +93,10 @@ class ExplicitLM(PreTrainedModel):
             
             # memory_bank存储token IDs，训练时固定，推理时通过LLMLingua更新
             # 存储在CPU上以节省GPU显存，使用时临时传输到GPU
-            memory_bank_tensor = torch.randint(
-                0, qwen3_config.vocab_size, (knowledge_num, knowledge_length)
+            # 使用 pad_token_id 初始化（如果可用），否则使用 0
+            pad_token_id = getattr(qwen3_config, 'pad_token_id', 0) or 0
+            memory_bank_tensor = torch.full(
+                (knowledge_num, knowledge_length), pad_token_id, dtype=torch.long
             )
             self.register_buffer(
                 "memory_bank",
@@ -109,6 +121,19 @@ class ExplicitLM(PreTrainedModel):
                 torch.zeros(knowledge_num, dtype=torch.bool),
                 persistent=False,
             )
+            
+            # 注册 valid_mask buffer（标记哪些条目是有效的，非空条目）
+            # 如果记忆库是随机初始化的（全为 pad_token_id），则 valid_mask 全为 False
+            # 加载 cache 时会被更新为实际的 valid_mask
+            # 注意：随机初始化的记忆库所有条目都是 pad，所以初始时全为 False
+            is_random_init = (memory_bank_tensor == pad_token_id).all()
+            initial_valid_mask = torch.zeros(knowledge_num, dtype=torch.bool) if is_random_init else torch.ones(knowledge_num, dtype=torch.bool)
+            self.register_buffer(
+                "valid_mask",
+                initial_valid_mask,
+                persistent=True,  # 持久化，确保保存和加载时包含
+            )
+            self.valid_mask = self.valid_mask.cpu()
         else:
             # MOE 模式：不需要 memory_bank
             self.memory_bank = None
@@ -220,8 +245,10 @@ class ExplicitLM(PreTrainedModel):
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
         
-        total_similarity_loss = torch.tensor(0.0, device=hidden_states.device)
-        total_diversity_loss = torch.tensor(0.0, device=hidden_states.device)
+        # 初始化 baseline_loss（相对基线损失）
+        # 注意：不能使用 requires_grad=True 的叶子变量，因为后面会用 += 进行原地操作
+        # 使用 0.0 初始化，第一次累加时会自动创建计算图
+        total_baseline_loss = torch.tensor(0.0, device=hidden_states.device)
         total_moe_aux_loss = torch.tensor(0.0, device=hidden_states.device)
         all_layer_stats: Dict[str, float] = {}
         all_cosine_stats: Dict[str, Union[torch.Tensor, float]] = {}
@@ -235,7 +262,7 @@ class ExplicitLM(PreTrainedModel):
             )
             
             if use_moe:
-                hidden_states, sim_loss, div_loss, layer_stats, cosine_stats = layer(
+                hidden_states, sim_loss, layer_stats, cosine_stats = layer(
                     hidden_states=hidden_states,
                     attention_mask=layer_attention_mask,
                     position_ids=position_ids,
@@ -252,7 +279,7 @@ class ExplicitLM(PreTrainedModel):
                     elif isinstance(moe_aux, torch.Tensor):
                         total_moe_aux_loss += moe_aux
             else:
-                hidden_states, sim_loss, div_loss, layer_stats, cosine_stats = layer(
+                hidden_states, sim_loss, layer_stats, cosine_stats = layer(
                     hidden_states=hidden_states,
                     attention_mask=layer_attention_mask,
                     position_ids=position_ids,
@@ -261,11 +288,12 @@ class ExplicitLM(PreTrainedModel):
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
                     memory_bank=self.memory_bank,
+                    valid_mask=self.valid_mask,
                     tok_embeddings=self.tok_embeddings,
                     **kwargs,
                 )
-                total_similarity_loss += sim_loss
-                total_diversity_loss += div_loss
+                # 使用非原地操作，避免对叶子变量进行原地操作
+                total_baseline_loss = total_baseline_loss + sim_loss
             
             for k, v in layer_stats.items():
                 all_layer_stats[f"layer_{layer_idx}_{k}"] = v
@@ -282,8 +310,7 @@ class ExplicitLM(PreTrainedModel):
             }
         else:
             aux_loss = {
-                "similarity_loss": total_similarity_loss / n_layers,
-                "diversity_loss": total_diversity_loss / n_layers,
+                "baseline_loss": total_baseline_loss / n_layers,  # 相对基线损失（relative baseline loss）
             }
         
         self.OUT.__setitem__("last_hidden_state", hidden_states)
@@ -374,4 +401,3 @@ class ExplicitLM(PreTrainedModel):
             yield input_ids[:, start:]
             if next_tok.item() == eos_token_id:
                 break
-

@@ -1,0 +1,305 @@
+"""
+Qwen3ExplicitLMBlock: 基于Qwen3DecoderLayer的记忆增强Transformer块
+
+在Qwen3DecoderLayer基础上添加记忆检索和融合机制。
+"""
+
+from typing import Dict, Tuple, Union, Optional
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import logging
+from transformers.models.qwen3.modeling_qwen3 import (
+    Qwen3DecoderLayer,
+    Qwen3Config,
+    Cache,
+)
+from transformers.utils import TransformersKwargs
+from typing import Unpack
+
+from models.memory_bank.MemoryGate import MemoryGate
+from models.memory_bank.GatedMemoryFusion import GatedMemoryFusion
+from models.layers.RMSNorm import RMSNorm
+
+logger = logging.getLogger(__name__)
+
+
+class Qwen3ExplicitLMBlock(nn.Module):
+    """基于Qwen3DecoderLayer的记忆增强Transformer块"""
+
+    def __init__(self, config: Qwen3Config, layer_idx: int, memory_cfg: dict, shared_memory_gate: Optional[MemoryGate] = None) -> None:
+        """
+        Args:
+            config: Qwen3Config配置对象
+            layer_idx: 当前层的ID索引
+            memory_cfg: 记忆库相关配置字典
+            shared_memory_gate: 共享的 MemoryGate 实例（所有层共享）
+        """
+        super().__init__()
+        self.config = config
+        self.layer_idx = layer_idx
+        self.memory_cfg = memory_cfg
+        self.hidden_size = config.hidden_size
+        
+        self.qwen3_decoder = Qwen3DecoderLayer(config, layer_idx)
+        
+        use_moe = memory_cfg.get("use_moe", False)
+        if not use_moe:
+            self.memory_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            
+            # Use shared MemoryGate (passed from ExplicitLM)
+            if shared_memory_gate is None:
+                raise ValueError("shared_memory_gate must be provided when use_moe=False")
+            self.memory_gate = shared_memory_gate
+            
+            # Each layer has its own fusion module
+            memory_cfg_with_dim = memory_cfg.copy()
+            memory_cfg_with_dim["dim"] = config.hidden_size
+            self.gated_memory_fusion = GatedMemoryFusion(memory_cfg_with_dim)
+            
+            self.gumbel_temperature = memory_cfg.get("gumbel_temperature", 1.0)
+
+            # 记忆残差外层缩放（全局开关）
+            # 作用：全局控制memory模块的启用程度，实现渐进式学习
+            # - 初始值较小（0.05），允许微弱梯度流动，但不影响主模型
+            # - 训练过程中逐步增长，让模型学习使用memory
+            # - 与GatedMemoryFusion中的alpha（内容门控）配合使用：
+            #   * residual_scale: 控制"是否启用memory功能"（全局，从0→1）
+            #   * alpha: 控制"使用多少memory"（内容感知，基于相似度）
+            scale_init_target = memory_cfg.get("memory_residual_scale_init", 0.05)
+            trainable_scale = memory_cfg.get("memory_residual_scale_trainable", True)
+            eps = 1e-6  # 避免 logit(0/1) 无穷
+            scale_init_clamped = max(min(scale_init_target, 1.0 - eps), eps)
+            raw_init = torch.logit(torch.tensor(scale_init_clamped))
+            self.memory_residual_scale = nn.Parameter(raw_init.view(1, 1, 1))
+            self.memory_residual_scale.requires_grad = trainable_scale
+        else:
+            self.memory_norm = None
+            self.memory_gate = None
+            self.gated_memory_fusion = None
+            self.memory_residual_scale = None
+
+    def gumbel_softmax_selection(
+        self,
+        similarity_scores: torch.Tensor,
+        temperature: float = 1.0,
+        hard: bool = True,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Gumbel-Softmax选择机制"""
+        gumbel_noise = -torch.log(-torch.log(torch.rand_like(similarity_scores) + 1e-20) + 1e-20)
+        logits = (similarity_scores + gumbel_noise) / temperature
+        soft_weights = F.softmax(logits, dim=-1)
+        if hard:
+            _, max_indices = soft_weights.max(dim=-1, keepdim=True)
+            hard_weights = torch.zeros_like(soft_weights).scatter_(-1, max_indices, 1.0)
+            selection_weights = hard_weights - soft_weights.detach() + soft_weights
+            selected_indices = max_indices.squeeze(-1)
+        else:
+            selection_weights = soft_weights
+            selected_indices = torch.argmax(soft_weights, dim=-1)
+        return selection_weights, selected_indices
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        memory_bank: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
+        tok_embeddings: Optional[nn.Embedding] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, float], Dict[str, Union[torch.Tensor, float]]]:
+        """
+        Args:
+            hidden_states: 输入隐藏状态
+            memory_bank: 记忆库 [knowledge_num, knowledge_length]
+            tok_embeddings: token嵌入层
+        Returns:
+            (output, sim_loss, layer_stats, cosine_stats)
+        """
+        use_moe = self.memory_cfg.get("use_moe", False)
+        
+        hidden_states = self.qwen3_decoder(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+            **kwargs,
+        )
+        
+        if use_moe:
+            # 对于 MoE 模式，similarity_loss 应该为 0（不需要梯度）
+            similarity_loss = torch.tensor(0.0, device=hidden_states.device, requires_grad=False)
+            layer_stats = {}
+            cosine_stats = {}
+            return hidden_states, similarity_loss, layer_stats, cosine_stats
+        else:
+            h_for_memory = self.memory_norm(hidden_states)
+            
+            # MemoryGate 生成候选（推理模式）
+            candidate_indices, candidate_scores = self.memory_gate(h_for_memory)
+            bsz, seq_len, num_candidates = candidate_indices.shape
+            
+            candidate_indices_flat = candidate_indices.reshape(-1)
+            # memory_bank 存储在 CPU 上，使用时临时传输到 GPU
+            if memory_bank.device.type != 'cuda':
+                memory_bank = memory_bank.to(candidate_indices_flat.device, non_blocking=True)
+            candidate_token_ids = memory_bank[candidate_indices_flat]
+            
+            # 检查哪些候选条目是全pad（无效内容）
+            # candidate_token_ids: [num_total_candidates, knowledge_length]
+            # 获取pad_token_id（通常为0或tokenizer的pad_token_id）
+            pad_token_id = getattr(self.config, 'pad_token_id', 0) or 0
+            # 检查每个候选条目是否全为pad_token_id
+            # 如果所有token都是pad_token_id，则该条目无效
+            candidate_is_all_pad = (candidate_token_ids == pad_token_id).all(dim=-1)  # [num_total_candidates]
+            candidate_is_all_pad = candidate_is_all_pad.reshape(bsz, seq_len, num_candidates)  # [bsz, seq_len, num_candidates]
+            
+            batch_size_embed = 32
+            num_total_candidates = candidate_token_ids.shape[0]
+            candidate_embeddings_list = []
+            
+            for i in range(0, num_total_candidates, batch_size_embed):
+                end_idx = min(i + batch_size_embed, num_total_candidates)
+                batch_token_ids = candidate_token_ids[i:end_idx]
+                batch_embeddings = tok_embeddings(batch_token_ids)
+                batch_memories = batch_embeddings.mean(dim=1)
+                candidate_embeddings_list.append(batch_memories)
+                del batch_embeddings, batch_token_ids
+                torch.cuda.empty_cache()
+            
+            candidate_memories_flat = torch.cat(candidate_embeddings_list, dim=0)
+            candidate_memories = candidate_memories_flat.reshape(bsz, seq_len, num_candidates, self.hidden_size)
+            del candidate_embeddings_list, candidate_memories_flat, candidate_token_ids, candidate_indices_flat
+            
+            # 优化：归一化后立即计算相似度，减少中间张量
+            h_normalized = F.normalize(h_for_memory, p=2, dim=-1)
+            candidate_normalized = F.normalize(candidate_memories, p=2, dim=-1)
+            similarity_scores = torch.einsum('bsd,bsnd->bsn', h_normalized, candidate_normalized)
+            del h_normalized, candidate_normalized
+            
+            # 过滤空条目：对无效条目的相似度分数设置为极低值
+            # 1. 检查valid_mask（如果存在）
+            candidate_valid = None
+            if valid_mask is not None:
+                # valid_mask 存储在 CPU 上，需要临时传输到 GPU
+                if valid_mask.device.type != 'cuda':
+                    valid_mask_gpu = valid_mask.to(candidate_indices.device, non_blocking=True)
+                else:
+                    valid_mask_gpu = valid_mask
+                # candidate_indices: [bsz, seq_len, num_candidates]
+                # 获取每个候选索引对应的 valid_mask 值
+                candidate_valid = valid_mask_gpu[candidate_indices]  # [bsz, seq_len, num_candidates]
+                del valid_mask_gpu
+            
+            # 2. 检查内容是否全为pad（即使valid_mask为True，全pad的条目也应该被过滤）
+            # candidate_is_all_pad: [bsz, seq_len, num_candidates]
+            # 如果valid_mask存在，需要同时满足valid_mask和不是全pad
+            if candidate_valid is not None:
+                # 同时检查valid_mask和内容有效性
+                candidate_valid = candidate_valid & (~candidate_is_all_pad)
+            else:
+                candidate_valid = ~candidate_is_all_pad
+            
+            # 对无效条目设置极低分数，确保不会被选中
+            similarity_scores = similarity_scores.masked_fill(~candidate_valid, -1e9)
+            
+            selection_weights, selected_indices = self.gumbel_softmax_selection(
+                similarity_scores, temperature=self.gumbel_temperature, hard=True
+            )
+            
+            # 计算实际被选中的记忆库索引（用于记录使用情况）
+            # candidate_indices: [bsz, seq_len, num_candidates]
+            # selected_indices: [bsz, seq_len] - 候选中的位置索引 (0 到 num_candidates-1)
+            # 使用gather从candidate_indices中获取实际索引
+            actual_selected_indices = candidate_indices.gather(
+                dim=-1, 
+                index=selected_indices.unsqueeze(-1)
+            ).squeeze(-1)  # [bsz, seq_len]
+            
+            # 记录被选中记忆的相似度（用于统计和 fusion）
+            # 从 similarity_scores 中获取选中记忆的相似度
+            selected_similarities = similarity_scores.gather(
+                dim=-1,
+                index=selected_indices.unsqueeze(-1)
+            ).squeeze(-1)  # [bsz, seq_len]
+            
+            selected_memory = (candidate_memories * selection_weights.unsqueeze(-1)).sum(dim=2)
+            
+            # 计算相对基线损失：基于实际 embedding 的相似度
+            similarity_loss = self.memory_gate.compute_loss_single_target(
+                query_embedding=h_for_memory,
+                selected_knowledge_embedding=selected_memory,
+                memory_bank=memory_bank,
+                selected_index=actual_selected_indices,
+                tok_embeddings=tok_embeddings,
+                valid_mask=valid_mask,
+                pad_token_id=pad_token_id,
+            )
+            # 计算完成后立即释放 candidate_memories 以节省显存
+            del candidate_memories
+            torch.cuda.empty_cache()
+            memory_output = self.gated_memory_fusion(
+                h_for_memory, 
+                selected_memory,
+                similarity_scores=selected_similarities
+            )
+            
+            # 外层残差缩放（全局开关）：控制memory模块的整体贡献
+            # 与GatedMemoryFusion中的alpha配合，实现双重缩放机制
+            residual_scale = torch.sigmoid(self.memory_residual_scale).to(memory_output.dtype)
+            memory_output = residual_scale * memory_output
+            out = hidden_states + memory_output
+            
+            layer_stats = self._compute_selection_stats(candidate_indices, selection_weights)
+            cosine_stats = {
+                "similarity_scores": similarity_scores,
+                "selected_similarities": selected_similarities,
+                "actual_selected_indices": actual_selected_indices,  # 实际被选中的记忆库索引
+                "avg_similarity": similarity_scores.mean().item(),
+                "max_similarity": similarity_scores.max().item(),
+                "min_similarity": similarity_scores.min().item(),
+                "selected_avg_similarity": selected_similarities.mean().item(),
+                "selection_entropy": -torch.sum(
+                    selection_weights * torch.log(selection_weights + 1e-10), dim=-1
+                ).mean().item(),
+            }
+            
+            return out, similarity_loss, layer_stats, cosine_stats
+
+    def _compute_selection_stats(
+        self,
+        candidate_indices: torch.Tensor,
+        selection_weights: torch.Tensor,
+    ) -> Dict[str, float]:
+        """计算选择统计信息"""
+        device = candidate_indices.device
+        flat_indices = candidate_indices.reshape(-1)
+        flat_weights = selection_weights.reshape(-1)
+        knowledge_num = self.memory_cfg["knowledge_num"]
+        memory_counts = torch.zeros(knowledge_num, device=device, dtype=flat_weights.dtype)
+        memory_counts.scatter_add_(0, flat_indices, flat_weights)
+        with torch.no_grad():
+            memory_counts_fp32 = memory_counts.float()
+            coverage_rate = (memory_counts_fp32 > 0.01).float().mean().item()
+            top10_threshold = torch.quantile(memory_counts_fp32, 0.9)
+            hot_memories = (memory_counts_fp32 >= top10_threshold).sum().item()
+            dead_memories = (memory_counts_fp32 < 0.01).sum().item()
+            selection_variance = memory_counts_fp32.var().item()
+            stats = {
+                "coverage_rate": coverage_rate,
+                "hot_memories": hot_memories,
+                "dead_memories": dead_memories,
+                "selection_variance": selection_variance,
+                "max_selections": memory_counts_fp32.max().item(),
+                "min_selections": memory_counts_fp32.min().item(),
+            }
+        return stats
+

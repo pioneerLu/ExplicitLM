@@ -10,11 +10,6 @@ class GatedMemoryFusionLoRA(nn.Module):
     
     使用低秩分解的 SwiGLU 门控 MLP 融合记忆，通过相似度动态控制 memory 贡献。
     公式：out = hidden_states + alpha * memory_output
-    
-    相比原版本：
-    - gate_proj, up_proj, down_proj 使用低秩分解（LoRA-style）
-    - 移除 similarity_gate，直接使用 similarity_scores 作为 alpha
-    - 参数量减少约 92%，计算量减少约 50%
     """
 
     def __init__(self, cfg: dict) -> None:

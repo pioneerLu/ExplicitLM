@@ -60,11 +60,13 @@ class DualPathInference:
         
         # 初始化记忆库更新器
         if memory_bank_updater is None and enable_fact_extraction:
+            # 默认使用 "lru" 策略（最不常用替换）
+            effective_strategy = update_strategy if update_strategy else "lru"
             self.memory_bank_updater = MemoryBankUpdater(
                 model=model,
                 tokenizer=tokenizer,
                 fact_extractor=self.fact_extractor,
-                update_strategy=update_strategy,
+                update_strategy=effective_strategy,
             )
         else:
             self.memory_bank_updater = memory_bank_updater
@@ -97,6 +99,30 @@ class DualPathInference:
                 'memory_update': Dict,  # 记忆库更新结果（如果启用）
             }
         """
+        # 先进行一次forward来获取知识使用情况（只对输入部分）
+        all_accessed_indices = []
+        unique_indices = []
+        if self.memory_bank_updater is not None:
+            with torch.no_grad():
+                # 只对输入进行forward，获取知识使用情况
+                forward_output = self.model(input_ids, use_cache=False)
+                if hasattr(forward_output, 'cosine_stats') and forward_output.cosine_stats:
+                    cosine_stats = forward_output.cosine_stats
+                    for key, value in cosine_stats.items():
+                        if key.endswith('_actual_selected_indices'):
+                            # value: [bsz, seq_len] 或 [seq_len]
+                            if isinstance(value, torch.Tensor):
+                                # 展平并转换为列表
+                                indices = value.flatten().cpu().tolist()
+                                all_accessed_indices.extend(indices)
+            
+            # 去重并记录
+            if all_accessed_indices:
+                unique_indices = list(set(all_accessed_indices))
+                self.memory_bank_updater.record_access(unique_indices)
+                print(f"[知识使用记录] 本次推理使用了 {len(unique_indices)} 个不同的知识条目: {unique_indices[:10]}{'...' if len(unique_indices) > 10 else ''}")
+        
+        # 进行生成
         with torch.no_grad():
             generated_ids = self.model.generate(input_ids, **generation_kwargs)
         
@@ -121,6 +147,7 @@ class DualPathInference:
         result = {
             'generated_ids': generated_ids,
             'generated_text': generated_text,
+            'accessed_knowledge_indices': unique_indices,
         }
         
         if self.enable_fact_extraction:

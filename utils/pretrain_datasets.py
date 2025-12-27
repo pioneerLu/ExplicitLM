@@ -1,61 +1,113 @@
 """
-预训练数据集模块
+预训练数据集模块（用于纯文本数据，非对话格式）
 
 功能：
-- PretrainDataset: 基础预训练数据集类
+- PretrainDataset: 基础预训练数据集类（支持JSONL和Parquet）
 - create_pretrain_dataloader: 数据加载器工厂函数
 - 支持数据过滤、验证和批处理
+
+注意：
+- 预训练数据集用于纯文本数据（如 data/parquet_data），不是对话格式
+- SFT数据集用于对话格式数据（如 train.jsonl），使用 utils/sft_datasets.py
 """
 
 import json
 import os
-from typing import Dict, Any, List, Tuple
+import hashlib
+from typing import Dict, Any, List, Tuple, Optional, Union
 
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 
 # 启用tokenizer并行化
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
+# Tokenizer 缓存目录
+TOKENIZER_CACHE_DIR = "/data2/zengzheni/lvchangwei/new_repo/ExplicitLM/tokenizer_cache"
 
-def _format_text_for_qwen_tokenizer(tokenizer: Any, text: str) -> str:
-    """
-    根据Qwen tokenizer的特殊token格式化文本。
-    Qwen通常使用 <|im_start|>user\n{text}<|im_end|> 格式。
-    """
-    im_start_token = "<|im_start|>"
-    im_end_token = "<|im_end|>"
 
-    # 检查tokenizer是否包含这些特殊token
-    if im_start_token in tokenizer.get_added_tokens_decoder().values() and \
-       im_end_token in tokenizer.get_added_tokens_decoder().values():
-        # 使用Qwen的对话格式
-        formatted_text = f"{im_start_token}user\n{text}{im_end_token}"
+def _get_cache_path(data_path: str, max_length: int, num_samples: Optional[int] = None) -> str:
+    """
+    生成缓存文件路径
+    
+    Args:
+        data_path: 数据路径（可能是文件、目录、通配符等）
+        max_length: 最大长度参数
+        num_samples: 可选，样本数量（用于 ValidationDataset）
+        
+    Returns:
+        缓存文件路径
+    """
+    # 确保缓存目录存在
+    os.makedirs(TOKENIZER_CACHE_DIR, exist_ok=True)
+    
+    # 规范化路径（转换为绝对路径）
+    abs_path = os.path.abspath(data_path)
+    
+    # 将路径中的特殊字符替换为下划线，生成安全的文件名
+    # 例如：/data2/zengzheni/.../sample_256 -> data2_zengzheni_..._sample_256
+    safe_name = abs_path.replace("/", "_").replace("\\", "_").replace(" ", "_")
+    safe_name = "".join(c if c.isalnum() or c in "_-" else "_" for c in safe_name)
+    
+    # 如果路径太长，使用 hash
+    if len(safe_name) > 200:
+        safe_name = hashlib.md5(abs_path.encode()).hexdigest()
+    
+    # 生成缓存文件名
+    if num_samples is not None:
+        cache_filename = f"{safe_name}_maxlen{max_length}_nsamples{num_samples}.pt"
     else:
-        # 回退到标准的bos_token/eos_token（如果存在）
-        if tokenizer.bos_token is not None and not text.startswith(tokenizer.bos_token):
-            text = f"{tokenizer.bos_token}{text}"
-        if tokenizer.eos_token is not None and not text.endswith(tokenizer.eos_token):
-            text = f"{text}{tokenizer.eos_token}"
-        formatted_text = text
-    return formatted_text
+        cache_filename = f"{safe_name}_maxlen{max_length}.pt"
+    
+    return os.path.join(TOKENIZER_CACHE_DIR, cache_filename)
+
+
+def build_pretrain_collate_fn(pad_token_id: int):
+    """
+    返回用于 PretrainDataset / ValidationDataset 的 collate_fn：
+    
+    - 输入：List[1D LongTensor]，每个为一条未 padding 的 token 序列
+    - 输出：(X, Y, loss_mask)，形状为:
+        X: [batch_size, max_seq_len-1]
+        Y: [batch_size, max_seq_len-1]
+        loss_mask: [batch_size, max_seq_len-1] (bool)
+    - 在 batch 内按最长序列做 dynamic padding
+    """
+    
+    def collate_fn(batch: List[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch = [seq for seq in batch if seq is not None and seq.numel() >= 2]
+        if len(batch) == 0:
+            raise ValueError("collate_fn 收到空 batch 或所有样本长度不足 2。")
+    
+        batch_sizes = [seq.size(0) for seq in batch]
+        max_len = max(batch_sizes)
+    
+        padded = torch.full(
+            (len(batch), max_len),
+            fill_value=pad_token_id,
+            dtype=torch.long,
+        )
+    
+        for i, seq in enumerate(batch):
+            cur_len = seq.size(0)
+            padded[i, :cur_len] = seq
+    
+        X = padded[:, :-1]
+        Y = padded[:, 1:]
+        loss_mask = (Y != pad_token_id)
+    
+        return X, Y, loss_mask
+    
+    return collate_fn
 
 
 class PretrainDataset(Dataset):
     """
-    预训练数据集类
-
-    功能：
-    - 从JSONL文件加载文本数据
-    - 自动添加特殊token（bos_token/eos_token）
-    - 生成input_ids和loss_mask用于训练
-
-    数据格式：
-    输入：JSONL文件，每行为一个JSON对象，包含'text'字段
-    输出：(X, Y, loss_mask)元组
-        - X: 输入序列 (input_ids[:-1])
-        - Y: 目标序列 (input_ids[1:])
-        - loss_mask: 损失计算掩码 (排除padding位置)
+    预训练数据集类（用于纯文本数据，非对话格式）
+    
+    - __getitem__ 只返回一段 token id 序列（1D LongTensor，不做 padding）
+    - Qwen 特殊 token 能力只在 __init__ 中探测一次
+    - tokenizer 只在 __init__ 中调用一次，对所有样本完成预编码
     """
 
     def __init__(
@@ -64,20 +116,117 @@ class PretrainDataset(Dataset):
         tokenizer: Any,
         max_length: int = 512
     ):
-        """
-        初始化预训练数据集
-
-        Args:
-            data_path: JSONL数据文件路径
-            tokenizer: Tokenizer实例，需包含bos_token、eos_token、pad_token_id
-            max_length: 最大序列长度
-        """
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.samples = self._load_data(data_path)
+
+        # 加载原始样本（仅 text）
+        self.samples: List[Dict[str, Any]] = self._load_data(data_path)
+
+        # 只探测一次 Qwen 对 <|im_start|> / <|im_end|> 的支持
+        self.im_start_token = "<|im_start|>"
+        self.im_end_token = "<|im_end|>"
+        has_im_start = False
+        has_im_end = False
+
+        if hasattr(self.tokenizer, 'added_tokens_decoder'):
+            added_tokens = self.tokenizer.added_tokens_decoder
+            token_contents = [
+                t.content if hasattr(t, 'content') else str(t)
+                for t in added_tokens.values()
+            ]
+            has_im_start = self.im_start_token in token_contents
+            has_im_end = self.im_end_token in token_contents
+
+        if not (has_im_start and has_im_end):
+            try:
+                im_start_ids = self.tokenizer.encode(self.im_start_token, add_special_tokens=False)
+                im_end_ids = self.tokenizer.encode(self.im_end_token, add_special_tokens=False)
+                has_im_start = len(im_start_ids) > 0
+                has_im_end = len(im_end_ids) > 0
+            except Exception:
+                pass
+
+        self.use_im_tokens = bool(has_im_start and has_im_end)
+
+        # 检查缓存
+        cache_path = _get_cache_path(data_path, max_length)
+        
+        if os.path.exists(cache_path):
+            # 从缓存加载
+            print(f"从缓存加载 tokenized 数据: {cache_path}")
+            try:
+                self.input_id_seqs = torch.load(cache_path, map_location='cpu')
+                print(f"成功加载 {len(self.input_id_seqs)} 个 tokenized 样本")
+                return
+            except Exception as e:
+                print(f"警告: 加载缓存失败 ({e})，将重新 tokenize")
+
+        # 预编码所有样本为 token id 序列（不做 padding）
+        print(f"开始 tokenize {len(self.samples)} 个样本...")
+        self.input_id_seqs: List[torch.Tensor] = []
+        for sample in self.samples:
+            text = str(sample['text'])
+
+            if self.use_im_tokens:
+                formatted = f"{self.im_start_token}user\n{text}{self.im_end_token}"
+            else:
+                if getattr(self.tokenizer, 'bos_token', None) is not None and not text.startswith(self.tokenizer.bos_token):
+                    text = f"{self.tokenizer.bos_token}{text}"
+                if getattr(self.tokenizer, 'eos_token', None) is not None and not text.endswith(self.tokenizer.eos_token):
+                    text = f"{text}{self.tokenizer.eos_token}"
+                formatted = text
+
+            encoded = self.tokenizer(
+                formatted,
+                max_length=self.max_length,
+                truncation=True,
+                padding=False,
+                add_special_tokens=False,
+                return_attention_mask=False,
+            )
+
+            ids = encoded["input_ids"]
+            input_ids = ids if isinstance(ids, torch.Tensor) else torch.tensor(ids, dtype=torch.long)
+            input_ids = input_ids.to(dtype=torch.long)
+
+            # 至少保留 2 个 token 才能构造 (X, Y)
+            if input_ids.numel() < 2:
+                continue
+
+            self.input_id_seqs.append(input_ids)
+        
+        # 保存缓存
+        print(f"Tokenize 完成，保存缓存到: {cache_path}")
+        try:
+            torch.save(self.input_id_seqs, cache_path)
+            print(f"缓存保存成功: {len(self.input_id_seqs)} 个样本")
+        except Exception as e:
+            print(f"警告: 保存缓存失败 ({e})")
 
     def _load_data(self, path: str) -> List[Dict[str, Any]]:
+        """
+        从JSONL或Parquet文件加载数据（自动检测格式）
+
+        Args:
+            path: JSONL或Parquet文件路径（支持目录、通配符、逗号分隔）
+
+        Returns:
+            样本列表，每个样本为包含'text'字段的字典
+        """
+        # 检测文件格式
+        if self._detect_format(path) == "parquet":
+            return self._load_parquet(path)
+        return self._load_jsonl(path)
+    
+    def _detect_format(self, path: str) -> str:
+        """检测数据格式"""
+        lower = path.lower()
+        if lower.endswith(".parquet") or "*" in path or "," in path or os.path.isdir(path):
+            return "parquet"
+        return "jsonl"
+    
+    def _load_jsonl(self, path: str) -> List[Dict[str, Any]]:
         """
         从JSONL文件加载数据
 
@@ -96,49 +245,91 @@ class PretrainDataset(Dataset):
                 data = json.loads(line)
                 samples.append(data)
         return samples
-
-    def __len__(self) -> int:
-        """返回数据集大小"""
-        return len(self.samples)
-
-    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    
+    def _load_parquet(self, path: str) -> List[Dict[str, Any]]:
         """
-        获取单个样本
+        从Parquet文件加载数据（支持多文件、目录、通配符）
 
         Args:
-            index: 样本索引
+            path: Parquet文件路径（支持逗号分隔、通配符、目录）
 
         Returns:
-            (X, Y, loss_mask)元组
-            - X: 输入序列张量 [max_length-1]
-            - Y: 目标序列张量 [max_length-1]
-            - loss_mask: 损失掩码张量 [max_length-1]
+            样本列表，每个样本为包含'text'字段的字典
         """
-        sample = self.samples[index]
-        text = str(sample['text'])
+        try:
+            import pyarrow.dataset as ds  # type: ignore
+        except ImportError as e:
+            raise ImportError("需要安装 pyarrow 才能读取 Parquet：pip install pyarrow") from e
+        
+        import os
+        import glob
+        
+        # 逗号分隔的多路径处理
+        path_list = [p.strip() for p in path.split(",") if p.strip()]
 
-        # 使用Qwen tokenizer的特殊格式（如果适用）
-        text = _format_text_for_qwen_tokenizer(self.tokenizer, text)
+        if not path_list:
+            raise FileNotFoundError(f"无效的数据路径: {path}")
+        
+        # 展开所有路径：如果是目录，列出其中的所有 parquet 文件
+        expanded_paths = []
+        for p in path_list:
+            if os.path.isdir(p):
+                # 目录：列出所有 .parquet 文件
+                parquet_files = glob.glob(os.path.join(p, "*.parquet"))
+                if not parquet_files:
+                    raise FileNotFoundError(f"目录中没有找到 Parquet 文件: {p}")
+                expanded_paths.extend(sorted(parquet_files))
+            elif os.path.isfile(p):
+                # 文件：直接添加
+                expanded_paths.append(p)
+            else:
+                matched = glob.glob(p)
+                if not matched:
+                    raise FileNotFoundError(f"路径不存在或没有匹配的文件: {p}")
+                expanded_paths.extend(sorted(matched))
+        
+        if not expanded_paths:
+            raise FileNotFoundError(f"没有找到任何 Parquet 文件: {path}")
+        
+        dataset = ds.dataset(expanded_paths, format="parquet")
+        schema_names = set(dataset.schema.names)
+        
+        # 预训练数据集只需要 'text' 列
+        if "text" not in schema_names:
+            raise ValueError(f"Parquet 缺少 'text' 列，无法用于预训练。可用列: {schema_names}")
+        
+        table = dataset.to_table(columns=["text"])
+        
+        samples: List[Dict[str, Any]] = []
+        skipped_count = 0
+        
+        for idx, row in enumerate(table.to_pylist(), 1):
+            try:
+                text = row.get("text", "")
+                if not text or not str(text).strip():
+                    skipped_count += 1
+                    continue
+                
+                samples.append({"text": str(text).strip()})
+            except Exception as e:
+                skipped_count += 1
+                if skipped_count <= 20:
+                    print(f"[警告] 跳过第{idx}行: {e}")
+                continue
+        
+        print(f"成功加载 {len(samples)} 个预训练样本（Parquet）")
+        if skipped_count > 20:
+            print(f"[警告] 还有 {skipped_count - 20} 个样本被跳过")
+        return samples
 
-        # Tokenization with padding and truncation
-        encoding = self.tokenizer(
-            text,
-            max_length=self.max_length,
-            padding='max_length',
-            truncation=True,
-            return_tensors='pt'
-        )
+    def __len__(self) -> int:
+        return len(self.input_id_seqs)
 
-        # 提取input_ids并生成loss_mask
-        input_ids = encoding.input_ids.squeeze()  # [max_length]
-        loss_mask = (input_ids != self.tokenizer.pad_token_id)  # [max_length]
-
-        # 生成训练对：X = input_ids[:-1], Y = input_ids[1:]
-        X = input_ids[:-1].clone()  # [max_length-1]
-        Y = input_ids[1:].clone()   # [max_length-1]
-        loss_mask = loss_mask[1:]   # [max_length-1]
-
-        return X, Y, loss_mask
+    def __getitem__(self, index: int) -> torch.Tensor:
+        """
+        返回一段未 padding 的 token id 序列（1D LongTensor）
+        """
+        return self.input_id_seqs[index]
 
 
 def create_pretrain_dataloader(
@@ -147,39 +338,13 @@ def create_pretrain_dataloader(
     batch_size: int,
     max_length: int = 512,
     shuffle: bool = True,
-    num_workers: int = 4,
-    pin_memory: bool = True
-) -> DataLoader:
+    num_workers: int = 0,
+    pin_memory: bool = True,
+    val_split_ratio: float = 0.0,
+    val_split_size: Optional[int] = None
+) -> Union[DataLoader, Tuple[DataLoader, DataLoader]]:
     """
-    创建预训练数据加载器的工厂函数
-
-    Args:
-        data_path: JSONL数据文件路径
-        tokenizer: Tokenizer实例
-        batch_size: 批次大小
-        max_length: 最大序列长度，默认512
-        shuffle: 是否打乱数据，默认True
-        num_workers: 数据加载进程数，默认4
-        pin_memory: 是否使用pin_memory加速GPU传输，默认True
-
-    Returns:
-        DataLoader实例
-
-    使用示例：
-        ```python
-        from utils.pretrain_datasets import create_pretrain_dataloader
-
-        train_loader = create_pretrain_dataloader(
-            data_path='data/train.jsonl',
-            tokenizer=tokenizer,
-            batch_size=32,
-            max_length=512
-        )
-
-        for batch_idx, (X, Y, loss_mask) in enumerate(train_loader):
-            # X, Y, loss_mask: [batch_size, max_length-1]
-            ...
-        ```
+    创建预训练数据加载器（tokenizer 仅在 Dataset 初始化阶段调用一次）
     """
     dataset = PretrainDataset(
         data_path=data_path,
@@ -187,16 +352,67 @@ def create_pretrain_dataloader(
         max_length=max_length
     )
 
-    dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=True  # 丢弃最后一个不完整的batch，保证batch_size一致
-    )
+    collate_fn = build_pretrain_collate_fn(pad_token_id=tokenizer.pad_token_id)
 
-    return dataloader
+    val_loader = None
+    if val_split_ratio > 0.0 or val_split_size is not None:
+        total_size = len(dataset)
+
+        if val_split_size is not None:
+            val_size = min(val_split_size, total_size - 1)
+        else:
+            val_size = int(total_size * val_split_ratio)
+
+        train_size = total_size - val_size
+
+        if train_size <= 0 or val_size <= 0:
+            raise ValueError(f"数据集分割失败: 总样本数={total_size}, 训练集={train_size}, 验证集={val_size}")
+
+        train_dataset, val_dataset = random_split(
+            dataset,
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(42)
+        )
+
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            drop_last=False,
+            persistent_workers=False,
+            prefetch_factor=2 if num_workers > 0 else None,
+            collate_fn=collate_fn,
+        )
+
+        train_dataloader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            drop_last=True,
+            persistent_workers=False,
+            prefetch_factor=2 if num_workers > 0 else None,
+            collate_fn=collate_fn,
+        )
+
+        return train_dataloader, val_loader
+    else:
+        train_dataloader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            drop_last=True,
+            persistent_workers=False,
+            prefetch_factor=2 if num_workers > 0 else None,
+            collate_fn=collate_fn,
+        )
+
+        return train_dataloader, None
 
 
 def validate_dataset(
@@ -229,13 +445,16 @@ def validate_dataset(
     sample_examples = []
 
     for i in range(min(max_samples, total_samples)):
-        X, Y, loss_mask = dataset[i]
+        seq = dataset[i]
+        # 动态构造统计信息（无 padding）
+        x_len = max(seq.size(0) - 1, 0)
         sample_info = {
             'index': i,
-            'X_shape': X.shape,
-            'Y_shape': Y.shape,
-            'loss_mask_shape': loss_mask.shape,
-            'num_valid_tokens': loss_mask.sum().item(),
+            'seq_len': seq.size(0),
+            'X_shape': (x_len,),
+            'Y_shape': (x_len,),
+            'loss_mask_shape': (x_len,),
+            'num_valid_tokens': x_len,
             'text_preview': dataset.samples[i]['text'][:100]  # 前100个字符
         }
         sample_examples.append(sample_info)
@@ -253,15 +472,10 @@ def validate_dataset(
 class ValidationDataset(Dataset):
     """
     验证数据集类
-
-    功能：
-    - 从JSON/JSONL文件加载验证数据
-    - 支持限制样本数量以加快验证
-    - 兼容PretrainDataset的数据格式
-
-    数据格式：
-    输入：JSON/JSONL文件，每行包含'text'字段
-    输出：与PretrainDataset相同的(X, Y, loss_mask)元组
+    
+    - __getitem__ 只返回一段 token id 序列（1D LongTensor，不做 padding）
+    - Qwen 特殊 token 能力只在 __init__ 中探测一次
+    - tokenizer 只在 __init__ 中调用一次，对所有样本完成预编码
     """
 
     def __init__(
@@ -271,38 +485,100 @@ class ValidationDataset(Dataset):
         max_length: int = 512,
         num_samples: int = 200
     ):
-        """
-        初始化验证数据集
-
-        Args:
-            data_path: JSON/JSONL验证数据文件路径
-            tokenizer: Tokenizer实例
-            max_length: 最大序列长度
-            num_samples: 验证样本数量限制，用于加快验证速度
-        """
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.num_samples = num_samples
         self.samples = self._load_validation_data(data_path)
 
+        # 只探测一次 Qwen 对 <|im_start|> / <|im_end|> 的支持
+        self.im_start_token = "<|im_start|>"
+        self.im_end_token = "<|im_end|>"
+        has_im_start = False
+        has_im_end = False
+
+        if hasattr(self.tokenizer, 'added_tokens_decoder'):
+            added_tokens = self.tokenizer.added_tokens_decoder
+            token_contents = [
+                t.content if hasattr(t, 'content') else str(t)
+                for t in added_tokens.values()
+            ]
+            has_im_start = self.im_start_token in token_contents
+            has_im_end = self.im_end_token in token_contents
+
+        if not (has_im_start and has_im_end):
+            try:
+                im_start_ids = self.tokenizer.encode(self.im_start_token, add_special_tokens=False)
+                im_end_ids = self.tokenizer.encode(self.im_end_token, add_special_tokens=False)
+                has_im_start = len(im_start_ids) > 0
+                has_im_end = len(im_end_ids) > 0
+            except Exception:
+                pass
+
+        self.use_im_tokens = bool(has_im_start and has_im_end)
+
+        # 检查缓存
+        cache_path = _get_cache_path(data_path, max_length, num_samples=num_samples)
+        
+        if os.path.exists(cache_path):
+            # 从缓存加载
+            print(f"从缓存加载 tokenized 数据: {cache_path}")
+            try:
+                self.input_id_seqs = torch.load(cache_path, map_location='cpu')
+                print(f"成功加载 {len(self.input_id_seqs)} 个 tokenized 样本")
+                return
+            except Exception as e:
+                print(f"警告: 加载缓存失败 ({e})，将重新 tokenize")
+
+        # 预编码所有样本为 token id 序列（不做 padding）
+        print(f"开始 tokenize {len(self.samples)} 个验证样本...")
+        self.input_id_seqs: List[torch.Tensor] = []
+        for sample in self.samples:
+            text = str(sample['text'])
+
+            if self.use_im_tokens:
+                formatted = f"{self.im_start_token}user\n{text}{self.im_end_token}"
+            else:
+                if getattr(self.tokenizer, 'bos_token', None) is not None and not text.startswith(self.tokenizer.bos_token):
+                    text = f"{self.tokenizer.bos_token}{text}"
+                if getattr(self.tokenizer, 'eos_token', None) is not None and not text.endswith(self.tokenizer.eos_token):
+                    text = f"{text}{self.tokenizer.eos_token}"
+                formatted = text
+
+            encoded = self.tokenizer(
+                formatted,
+                max_length=self.max_length,
+                truncation=True,
+                padding=False,
+                add_special_tokens=False,
+                return_attention_mask=False,
+            )
+
+            ids = encoded["input_ids"]
+            input_ids = ids if isinstance(ids, torch.Tensor) else torch.tensor(ids, dtype=torch.long)
+            input_ids = input_ids.to(dtype=torch.long)
+
+            if input_ids.numel() < 2:
+                continue
+
+            self.input_id_seqs.append(input_ids)
+        
+        # 保存缓存
+        print(f"Tokenize 完成，保存缓存到: {cache_path}")
+        try:
+            torch.save(self.input_id_seqs, cache_path)
+            print(f"缓存保存成功: {len(self.input_id_seqs)} 个样本")
+        except Exception as e:
+            print(f"警告: 保存缓存失败 ({e})")
+
     def _load_validation_data(self, path: str) -> List[Dict[str, Any]]:
-        """
-        从JSON/JSONL文件加载验证数据
-
-        Args:
-            path: 验证数据文件路径
-
-        Returns:
-            样本列表
-        """
         if not os.path.exists(path):
             raise FileNotFoundError(f"验证数据文件不存在: {path}")
 
         samples = []
         with open(path, 'r', encoding='utf-8') as f:
             for i, line in enumerate(f):
-                if i >= self.num_samples:  # 限制验证样本数量
+                if i >= self.num_samples:
                     break
 
                 line = line.strip()
@@ -311,7 +587,6 @@ class ValidationDataset(Dataset):
 
                 try:
                     data = json.loads(line)
-                    # 提取text字段
                     if 'text' in data:
                         samples.append({'text': data['text']})
                 except json.JSONDecodeError:
@@ -320,47 +595,13 @@ class ValidationDataset(Dataset):
         return samples
 
     def __len__(self) -> int:
-        """返回数据集大小"""
-        return len(self.samples)
+        return len(self.input_id_seqs)
 
-    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, index: int) -> torch.Tensor:
         """
-        获取单个样本，与PretrainDataset保持相同的接口
-
-        Args:
-            index: 样本索引
-
-        Returns:
-            (X, Y, loss_mask)元组
-            - X: 输入序列张量 [max_length-1]
-            - Y: 目标序列张量 [max_length-1]
-            - loss_mask: 损失掩码张量 [max_length-1]
+        返回一段未 padding 的 token id 序列（1D LongTensor）
         """
-        sample = self.samples[index]
-        text = str(sample['text'])
-
-        # 使用Qwen tokenizer的特殊格式（如果适用）
-        text = _format_text_for_qwen_tokenizer(self.tokenizer, text)
-
-        # Tokenization with padding and truncation
-        encoding = self.tokenizer(
-            text,
-            max_length=self.max_length,
-            padding='max_length',
-            truncation=True,
-            return_tensors='pt'
-        )
-
-        # 提取input_ids并生成loss_mask
-        input_ids = encoding.input_ids.squeeze()  # [max_length]
-        loss_mask = (input_ids != self.tokenizer.pad_token_id)  # [max_length]
-
-        # 生成训练对：X = input_ids[:-1], Y = input_ids[1:]
-        X = input_ids[:-1].clone()  # [max_length-1]
-        Y = input_ids[1:].clone()   # [max_length-1]
-        loss_mask = loss_mask[1:]   # [max_length-1]
-
-        return X, Y, loss_mask
+        return self.input_id_seqs[index]
 
 
 def create_validation_dataloader(
@@ -369,41 +610,11 @@ def create_validation_dataloader(
     batch_size: int,
     max_length: int = 512,
     num_samples: int = 200,
-    num_workers: int = 4,
+    num_workers: int = 0,  # 分布式训练中设置为 0 避免死锁
     pin_memory: bool = True
 ) -> DataLoader:
     """
-    创建验证数据加载器的工厂函数
-
-    Args:
-        val_data_path: 验证数据文件路径
-        tokenizer: Tokenizer实例
-        batch_size: 批次大小
-        max_length: 最大序列长度，默认512
-        num_samples: 验证样本数量，默认200
-        num_workers: 数据加载进程数，默认4
-        pin_memory: 是否使用pin_memory加速GPU传输，默认True
-
-    Returns:
-        DataLoader实例，如果文件不存在返回None
-
-    使用示例：
-        ```python
-        from utils.pretrain_datasets import create_validation_dataloader
-
-        val_loader = create_validation_dataloader(
-            val_data_path='data/benchmarks/eval_data.json',
-            tokenizer=tokenizer,
-            batch_size=32,
-            max_length=512,
-            num_samples=200
-        )
-
-        if val_loader is not None:
-            for batch_idx, (X, Y, loss_mask) in enumerate(val_loader):
-                # X, Y, loss_mask: [batch_size, max_length-1]
-                ...
-        ```
+    创建验证数据加载器（tokenizer 仅在 Dataset 初始化阶段调用一次）
     """
     if not os.path.exists(val_data_path):
         return None
@@ -415,13 +626,18 @@ def create_validation_dataloader(
         num_samples=num_samples
     )
 
+    collate_fn = build_pretrain_collate_fn(pad_token_id=tokenizer.pad_token_id)
+
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=False,  # 验证集不需要打乱
+        shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        drop_last=False  # 验证集保留所有样本
+        drop_last=False,
+        persistent_workers=False,
+        prefetch_factor=2 if num_workers > 0 else None,
+        collate_fn=collate_fn,
     )
 
     return dataloader
