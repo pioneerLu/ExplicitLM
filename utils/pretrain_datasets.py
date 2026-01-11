@@ -22,8 +22,10 @@ from torch.utils.data import Dataset, DataLoader, random_split
 # 启用tokenizer并行化
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
-# Tokenizer 缓存目录
-TOKENIZER_CACHE_DIR = "/data2/zengzheni/lvchangwei/new_repo/ExplicitLM/tokenizer_cache"
+# Tokenizer 缓存目录（相对于 ExplicitLM 根目录）
+from pathlib import Path
+_EXPLICITLM_ROOT = Path(__file__).parent.parent
+TOKENIZER_CACHE_DIR = str(_EXPLICITLM_ROOT / "tokenizer_cache")
 
 
 def _get_cache_path(data_path: str, max_length: int, num_samples: Optional[int] = None) -> str:

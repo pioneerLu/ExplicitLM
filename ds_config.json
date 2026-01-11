@@ -8,12 +8,12 @@
         "offload_optimizer": {
             "device": "none"
         },
-        "overlap_comm": true,
+        "overlap_comm": false,
         "contiguous_gradients": true,
         "reduce_bucket_size": 5e7,
         "allgather_partitions": true,
         "allgather_bucket_size": 5e7,
-        "round_robin_gradients": true
+        "round_robin_gradients": false
     },
     "fp16": {
         "enabled": false

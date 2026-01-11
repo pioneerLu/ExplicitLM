@@ -12,18 +12,18 @@ ModelConf = {
     
     # Memory / Knowledge 配置
     "use_token_memory": True,
-    "knowledge_dim": 1536,  # 与 router 权重匹配
-    "knowledge_length": 16,  # 每个记忆条目的 token 数
+    "knowledge_length": 32,  # 每个记忆条目的 token 数
     "knowledge_num": 1024*1024,  # 1048576 个记忆条目
     "keys_path": "data/keys.pt",  # Product Key Memory 的 keys 路径
-    "cache_path": "data/cache/knowledge_cache.pt",  # 记忆库缓存路径
-    "recompute_cache": False,  # 是否重新计算缓存
+    "trainable_keys": True,  # 是否允许 keys 在训练时更新
+    "cache_path": "data/cache/knowledge_cache.pt",  # 记忆库路径（支持 .pt 文件直接加载或 .json 文件处理后保存）
+    "recompute_cache": False,  # 是否重新计算缓存（仅对 .json 文件有效）
     "disable_db": False,  # 是否禁用数据库功能
-    "database_init_path": "data/knowledge_base/sentence_trex_data.json",  # 知识库初始化数据
     
-    # LoRA 配置（用于参数高效训练）
-    "gate_rank": 128,  # MemoryGate 低秩分解的 rank，None 表示使用原版本，>0 表示使用 LoRA 版本
-    "fusion_rank": 128,  # 融合模块低秩分解的 rank，None 表示使用原版本，>0 表示使用 LoRA 版本
+    # MemoryGate 配置（新版本，所有层共享）
+    "query_dim": 1024,  # Query 投影维度
+    "key_proj_dim": 512,  # Key 投影维度（用于 dot product）
+    "temperature": 0.1,  # Temperature for softmax in loss computation
     
     # MoE 配置（当前未使用）
     "use_moe": False,
@@ -34,4 +34,12 @@ ModelConf = {
     "gumbel_temperature": 1.0,
     "norm_topk_prob": True,
     "scoring_func": "softmax",
+    
+    "contrastive_temperature": 0.07,  # InfoNCE 损失的温度参数，控制正负样本的区分度
+                                      # 较小的值（如0.07）会使模型更关注高相似度的记忆
+                                      # 较大的值会使分布更平滑
+
+    # 记忆残差缩放（对 memory_output 的额外0-1权重，默认关闭记忆）
+    "memory_residual_scale_init": 0.0,         # 有效权重初值（0-1），默认近似0
+    "memory_residual_scale_trainable": True,   # 是否训练该缩放参数
 }

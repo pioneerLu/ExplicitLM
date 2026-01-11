@@ -68,7 +68,7 @@ uv run python scripts/convert_omcq_to_sft.py \
 ```bash
 export CUDA_VISIBLE_DEVICES=4,5
 
-uv run accelerate launch --config_file accelerate_config.yaml train_memory.py \
+uv run accelerate launch --config_file accelerate_config.yaml train_sft.py \
     model.qwen3_model_path=<YOUR_QWEN3_MODEL_PATH> \
     model.cache_path=data/cache/knowledge_cache.pt \
     model.keys_path=data/keys.pt \
@@ -136,52 +136,32 @@ python convert_conversations_to_labeled.py \
 
 ## 训练流程
 
-### 阶段 1：MemoryGate 训练（可选）
+### 阶段 1：Pretrain 数据训练（可选）
 
-训练 MemoryGate 组件，学习从查询中检索相关记忆。
+使用预训练格式数据训练 Fusion 组件。
 
-使用脚本：
 ```bash
-vim scripts/run_router.sh
-# 修改 MODEL_NAME="<YOUR_QWEN3_MODEL_PATH>"
-bash scripts/run_router.sh
+bash scripts/run_fusion_pretrain.sh
 ```
 
 或直接使用命令行：
 ```bash
-export CUDA_VISIBLE_DEVICES=0,1
-uv run python train_router.py \
-    --data_path=data/train_labeled.jsonl \
-    --model_name=<YOUR_QWEN3_MODEL_PATH> \
-    --output_dir=checkpoints/router \
-    --batch_size=1 \
-    --lr=1e-4 \
-    --epochs=3 \
-    --knowledge_num=65536 \
-    --num_candidates=32
-```
-
-输出：`checkpoints/router/memory_gate_epoch_X.pth`
-
-### 阶段 2：知识融合训练（可选）
-
-加载预训练的 MemoryGate，训练 GatedMemoryFusion。
-
-```bash
-uv run python train_fusion.py \
+export CUDA_VISIBLE_DEVICES=4,5,6,7
+uv run accelerate launch --config_file accelerate_config.yaml train_pretrain.py \
     --qwen3_model_path=<YOUR_QWEN3_MODEL_PATH> \
-    --pretrained_memory_gate_path=checkpoints/router/memory_gate.pth \
-    --dataset_path=data/database/merged_pretrain.jsonl \
-    --val_dataset_path=data/benchmarks/eval_data.json \
-    --knowledge_num=65536 \
+    --pretrained_memory_gate_path=router_only.pt \
+    --dataset_path=data/parquet_data/256 \
+    --knowledge_num=1048576 \
     --batch_size=8 \
     --lr=1e-4 \
-    --epochs=3
+    --epochs=3 \
+    --enable_memory_update \
+    --memory_update_frequency=100
 ```
 
-### 阶段 3：记忆组件训练（推荐）
+### 阶段 2：SFT 数据训练（推荐）
 
-直接训练所有记忆相关组件。
+使用对话格式数据训练 Fusion 组件。
 
 使用脚本：
 ```bash
@@ -193,7 +173,7 @@ bash scripts/run_sft.sh
 或直接使用命令行：
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1
-uv run accelerate launch --config_file accelerate_config.yaml train_memory.py \
+uv run accelerate launch --config_file accelerate_config.yaml train_sft.py \
     model.qwen3_model_path=<YOUR_QWEN3_MODEL_PATH> \
     model.cache_path=data/cache/knowledge_cache.pt \
     model.keys_path=data/keys.pt \
@@ -360,7 +340,7 @@ PyTorch 格式的二进制文件，包含 Product Key Memory 的查询键。
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1
 
-uv run accelerate launch --config_file accelerate_config.yaml train_memory.py \
+uv run accelerate launch --config_file accelerate_config.yaml train_sft.py \
     model.qwen3_model_path=/data/models/Qwen3-4b \
     model.cache_path=/data/cache/knowledge_cache.pt \
     model.keys_path=/data/keys.pt \
@@ -377,7 +357,7 @@ uv run accelerate launch --config_file accelerate_config.yaml train_memory.py \
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1
 
-uv run accelerate launch --config_file accelerate_config.yaml train_memory.py \
+uv run accelerate launch --config_file accelerate_config.yaml train_sft.py \
     model.qwen3_model_path=/data/models/Qwen3-4b \
     model.cache_path=/data/cache/knowledge_cache.pt \
     model.keys_path=/data/keys.pt \
@@ -395,7 +375,7 @@ uv run accelerate launch --config_file accelerate_config.yaml train_memory.py \
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1
 
-uv run accelerate launch --config_file accelerate_config.yaml train_memory.py \
+uv run accelerate launch --config_file accelerate_config.yaml train_sft.py \
     model.qwen3_model_path=/data/models/Qwen3-4b \
     model.cache_path=/data/cache/knowledge_cache.pt \
     model.keys_path=/data/keys.pt \
@@ -496,9 +476,7 @@ ExplicitLM/
 ├── config/             # 配置模块
 ├── utils/              # 工具函数
 ├── scripts/            # 启动脚本
-├── train_memory.py     # 记忆组件训练入口（推荐）
-├── train_router.py     # MemoryGate 训练
-├── train_fusion.py     # Fusion 训练
-├── train_joint.py      # 联合微调
+├── train_sft.py        # SFT 数据训练（对话格式）
+├── train_pretrain.py   # Pretrain 数据训练（纯文本格式）
 └── pyproject.toml      # 项目依赖
 ```

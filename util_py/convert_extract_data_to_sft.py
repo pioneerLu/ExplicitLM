@@ -309,7 +309,7 @@ def main():
     parser.add_argument(
         "--qwen-model-path",
         type=str,
-        default="/data2/zengzheni/lvchangwei/new_repo/Qwen/models/Qwen3-4b",
+        default="Qwen_hg/Qwen3-4b",  # 相对于 ExplicitLM 根目录
         help="Qwen3 模型路径（用于加载 tokenizer）"
     )
     parser.add_argument(

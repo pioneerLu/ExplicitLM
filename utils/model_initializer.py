@@ -474,6 +474,113 @@ def _init_qwen3_model(args: dict, accelerator=None):
     else:
         Logger("警告: 未指定记忆库路径或文件不存在，记忆库将使用随机初始化", accelerator)
 
+    # 处理 Keys 文件（如果 Memory Bank 已加载）
+    if not use_moe and hasattr(model, 'shared_memory_gate') and model.shared_memory_gate is not None:
+        keys_path = memory_cfg.get("keys_path")
+        if keys_path and os.path.exists(keys_path):
+            # Keys 文件存在，直接加载
+            Logger(f"📥 加载 Keys 文件: {keys_path}", accelerator)
+            try:
+                keys_data = torch.load(keys_path, map_location='cpu')
+                if isinstance(keys_data, dict):
+                    row_keys = keys_data.get("row_keys")
+                    col_keys = keys_data.get("col_keys")
+                    if row_keys is not None and col_keys is not None:
+                        model.shared_memory_gate.update_keys(row_keys, col_keys)
+                        Logger(f"✅ Keys 已加载: row_keys={row_keys.shape}, col_keys={col_keys.shape}", accelerator)
+                        
+                        # 检查 metadata 并提醒
+                        keys_metadata = keys_data.get("metadata", {})
+                        if keys_metadata:
+                            keys_dataset = keys_metadata.get("dataset_name", "unknown")
+                            keys_mb_path = keys_metadata.get("memory_bank_path", "unknown")
+                            Logger(f"⚠️  提醒: 请确认 Keys 与 Memory Bank 匹配", accelerator)
+                            Logger(f"   Keys 来源: dataset={keys_dataset}, mb_path={keys_mb_path}", accelerator)
+                    else:
+                        Logger(f"⚠️  Keys 文件格式不正确，将使用随机初始化的 keys", accelerator)
+                else:
+                    Logger(f"⚠️  Keys 文件格式不正确，将使用随机初始化的 keys", accelerator)
+            except Exception as e:
+                Logger(f"⚠️  加载 Keys 失败: {e}，将使用随机初始化的 keys", accelerator)
+        elif cache_path and os.path.exists(cache_path) and cache_path.endswith('.pt'):
+            # Keys 不存在但 Memory Bank 存在，自动生成
+            Logger(f"📥 Keys 文件不存在，将基于 Memory Bank 自动生成", accelerator)
+            try:
+                # 导入生成 keys 的函数
+                from util_py.generate_keys_from_memory_bank import generate_keys_from_token_ids, load_memory_bank_batch
+                
+                # 加载 Memory Bank 数据
+                mb_data = torch.load(cache_path, map_location='cpu')
+                if isinstance(mb_data, dict):
+                    mb_tensor = mb_data.get('memory_bank', mb_data.get('processed_tensor'))
+                    mb_valid_mask = mb_data.get('valid_mask', None)
+                    mb_metadata = mb_data.get('metadata', {})
+                else:
+                    mb_tensor = mb_data
+                    mb_valid_mask = None
+                    mb_metadata = {}
+                
+                if mb_tensor is not None:
+                    if mb_valid_mask is None:
+                        pad_token_id = getattr(qwen3_config, 'pad_token_id', 0) or 0
+                        is_all_pad = (mb_tensor == pad_token_id).all(dim=-1)
+                        mb_valid_mask = ~is_all_pad
+                    
+                    # 从 metadata 提取 dataset_name
+                    dataset_name = mb_metadata.get('dataset_name') if mb_metadata else None
+                    if not dataset_name:
+                        try:
+                            parent_dir = os.path.basename(os.path.dirname(os.path.abspath(cache_path)))
+                            if parent_dir:
+                                dataset_name = parent_dir
+                        except:
+                            pass
+                    
+                    # 生成临时 keys 文件路径
+                    temp_keys_path = cache_path.replace('.pt', '_keys.pt')
+                    if os.path.dirname(temp_keys_path) == os.path.dirname(cache_path):
+                        # 同目录下生成
+                        pass
+                    else:
+                        # 生成到当前工作目录
+                        temp_keys_path = os.path.join(os.getcwd(), os.path.basename(temp_keys_path))
+                    
+                    Logger(f"   正在生成 Keys（这可能需要一些时间）...", accelerator)
+                    generate_keys_from_token_ids(
+                        mb_tensor,
+                        mb_valid_mask,
+                        qwen3_model_path,
+                        temp_keys_path,
+                        device="cuda" if torch.cuda.is_available() else "cpu",
+                        batch_size=32,
+                        knowledge_num=memory_cfg["knowledge_num"],
+                        memory_bank_path=cache_path,
+                        dataset_name=dataset_name,
+                    )
+                    
+                    # 加载生成的 keys
+                    keys_data = torch.load(temp_keys_path, map_location='cpu')
+                    if isinstance(keys_data, dict):
+                        row_keys = keys_data.get("row_keys")
+                        col_keys = keys_data.get("col_keys")
+                        if row_keys is not None and col_keys is not None:
+                            model.shared_memory_gate.update_keys(row_keys, col_keys)
+                            Logger(f"✅ Keys 已自动生成并加载: {temp_keys_path}", accelerator)
+                            Logger(f"   row_keys={row_keys.shape}, col_keys={col_keys.shape}", accelerator)
+                        else:
+                            Logger(f"⚠️  生成的 Keys 格式不正确", accelerator)
+                    else:
+                        Logger(f"⚠️  生成的 Keys 格式不正确", accelerator)
+                else:
+                    Logger(f"⚠️  无法从 Memory Bank 生成 Keys（Memory Bank 数据为空）", accelerator)
+            except Exception as e:
+                Logger(f"⚠️  自动生成 Keys 失败: {e}，将使用随机初始化的 keys", accelerator)
+                import traceback
+                Logger(f"   错误详情: {traceback.format_exc()}", accelerator)
+        else:
+            Logger("⚠️  未指定 Keys 路径且无法自动生成，将使用随机初始化的 keys", accelerator)
+            Logger("   提示: 可以稍后手动运行 generate_keys_from_memory_bank.py 生成 Keys", accelerator)
+
     # 冻结Qwen主模型参数，只保留记忆库相关参数可训练
     Logger("🔒 冻结Qwen主模型参数...", accelerator)
     frozen_params = 0

@@ -16,7 +16,7 @@ TrainingConf = {
     "mixed_precision": "bf16",      # 混合精度
     "seed": 1337,                   # 随机种子
     "devices": "auto",              # 多卡
-    "strategy": "deepspeed_stage_3",
+    "strategy": "deepspeed_stage_2",
     "log_interval": 10,
 
     # ---- SFT 特定参数 ----
@@ -25,7 +25,10 @@ TrainingConf = {
     "start_eval": 100,              # 开始评估的步数
     "judger_mode": "startswith",    # 判断模式
     "show_eval_res": 5,             # 评估样例展示数量
-    "similarity_loss_coef": 0.1,    # 相似度损失系数
-    "diversity_loss_coef": 0.05,    # 多样性损失系数
+    "similarity_loss_coef": 1.0,   
+                                     # 1.0 = 完全平衡（两个 loss 贡献相等）
+                                     # 0.5 = similarity_loss 贡献是 ce_loss 的一半
+                                     # 2.0 = similarity_loss 贡献是 ce_loss 的两倍
+                                    
     "eval_num_samples": 200,        # 评估样本数量
 }

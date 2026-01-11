@@ -23,8 +23,10 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 # 设置tokenizers并行化为True以提升性能
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
-# Tokenizer 缓存目录
-TOKENIZER_CACHE_DIR = "/data2/zengzheni/lvchangwei/new_repo/ExplicitLM/tokenizer_cache"
+# Tokenizer 缓存目录（相对于 ExplicitLM 根目录）
+from pathlib import Path
+_EXPLICITLM_ROOT = Path(__file__).parent.parent
+TOKENIZER_CACHE_DIR = str(_EXPLICITLM_ROOT / "tokenizer_cache")
 
 
 def _get_cache_path_sft(data_path: str, max_length: int, system_message: str) -> str:

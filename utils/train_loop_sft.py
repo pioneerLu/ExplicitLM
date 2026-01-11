@@ -433,7 +433,9 @@ def train_epoch_sft(
     overall_start_time: float,
     swanlab_run: Optional[Any],
     tokenizer: Any,
-    eval_loader: Optional[DataLoader] = None
+    eval_loader: Optional[DataLoader] = None,
+    memory_bank_updater: Optional[Any] = None,  # 可选的已初始化的 memory_bank_updater
+    memory_update_tracker: Optional[Any] = None,  # 可选的已初始化的 memory_update_tracker
 ) -> None:
     """
     SFT阶段的单个epoch训练循环
@@ -474,9 +476,8 @@ def train_epoch_sft(
     last_log_time = epoch_start_time
     
     # 初始化知识更新组件（如果启用）
-    memory_bank_updater = None
-    memory_update_tracker = None
-    
+    # 如果已经传入初始化的对象，则使用传入的；否则在函数内部初始化（向后兼容）
+    if memory_bank_updater is None or memory_update_tracker is None:
     # 检查是否有 memory_update 配置（兼容旧配置）
     memory_update_cfg = getattr(args, 'memory_update', None)
     if memory_update_cfg is None:
@@ -486,36 +487,41 @@ def train_epoch_sft(
     if memory_update_cfg and memory_update_cfg.get("enable_memory_update_during_training", False):
         from utils.memory_bank_updater import MemoryBankUpdater
         from utils.fact_extractor import FactExtractor
+            from config.memory_update import MemoryUpdateConf
         
         # 只在主进程初始化（避免重复初始化）
         if accelerator.is_main_process:
             # 获取配置值（支持 ConfigDict 和 dict）
             def get_cfg_value(key, default):
-                if hasattr(memory_update_cfg, 'get'):
+                    if isinstance(memory_update_cfg, dict):
+                        return memory_update_cfg.get(key, default)
+                    elif hasattr(memory_update_cfg, 'get'):
                     return memory_update_cfg.get(key, default)
                 else:
                     return getattr(memory_update_cfg, key, default)
             
+                if memory_bank_updater is None:
             fact_extractor = FactExtractor(
-                model_path=get_cfg_value("llmlingua_model_path", "/data2/zengzheni/lvchangwei/new_repo/bert/llmlingua-2-bert"),
-                compression_rate=get_cfg_value("memory_compression_rate", 0.4)
+                        model_path=get_cfg_value("llmlingua_model_path", MemoryUpdateConf.get("llmlingua_model_path", "llmlingua-2-bert")),
+                        compression_rate=get_cfg_value("memory_compression_rate", MemoryUpdateConf.get("memory_compression_rate", 0.4))
             )
             
             memory_bank_updater = MemoryBankUpdater(
                 model=unwrapped_model,
                 tokenizer=tokenizer,
                 fact_extractor=fact_extractor,
-                update_strategy=get_cfg_value("memory_update_strategy", "lru")
+                        update_strategy=get_cfg_value("memory_update_strategy", MemoryUpdateConf.get("memory_update_strategy", "lru"))
             )
             
+                if memory_update_tracker is None:
             # 初始化更新追踪器
             total_valid_entries = unwrapped_model.valid_mask.sum().item() if hasattr(unwrapped_model, 'valid_mask') else unwrapped_model.memory_bank.shape[0]
             memory_update_tracker = MemoryUpdateTracker(
                 total_valid_entries=total_valid_entries,
-                update_ratio_threshold=get_cfg_value("keys_recluster_update_ratio_threshold", 0.1)
+                        update_ratio_threshold=get_cfg_value("keys_recluster_update_ratio_threshold", MemoryUpdateConf.get("keys_recluster_update_ratio_threshold", 0.1))
             )
             
-            Logger(f"知识更新组件初始化完成: 更新频率={get_cfg_value('memory_update_frequency', 100)}, 重聚阈值={get_cfg_value('keys_recluster_update_ratio_threshold', 0.1)}", accelerator)
+                Logger(f"知识更新组件初始化完成: 更新频率={get_cfg_value('memory_update_frequency', MemoryUpdateConf.get('memory_update_frequency', 100))}, 重聚阈值={get_cfg_value('keys_recluster_update_ratio_threshold', MemoryUpdateConf.get('keys_recluster_update_ratio_threshold', 0.1))}", accelerator)
         
         # 同步所有进程（确保主进程初始化完成）
         accelerator.wait_for_everyone()
@@ -608,14 +614,20 @@ def train_epoch_sft(
         
         # 知识更新和 Keys 重新聚类（如果启用）
         if memory_bank_updater is not None and memory_update_tracker is not None and accelerator.is_main_process:
-            # 获取配置值（支持 ConfigDict 和 dict）
-            def get_cfg_value(key, default):
-                if hasattr(memory_update_cfg, 'get'):
-                    return memory_update_cfg.get(key, default)
-                else:
-                    return getattr(memory_update_cfg, key, default)
+            from config.memory_update import MemoryUpdateConf
             
-            update_frequency = get_cfg_value("memory_update_frequency", 0)
+            # 获取配置值（支持 ConfigDict 和 dict），使用 MemoryUpdateConf 作为默认值
+            def get_cfg_value(key, default):
+                if memory_update_cfg:
+                    if isinstance(memory_update_cfg, dict):
+                        return memory_update_cfg.get(key, MemoryUpdateConf.get(key, default))
+                    elif hasattr(memory_update_cfg, 'get'):
+                        return memory_update_cfg.get(key, MemoryUpdateConf.get(key, default))
+                else:
+                        return getattr(memory_update_cfg, key, MemoryUpdateConf.get(key, default))
+                return MemoryUpdateConf.get(key, default)
+            
+            update_frequency = get_cfg_value("memory_update_frequency", MemoryUpdateConf.get("memory_update_frequency", 0))
             
             # 按频率进行知识更新
             if update_frequency > 0 and (step + 1) % update_frequency == 0:
@@ -641,7 +653,7 @@ def train_epoch_sft(
                     with torch.no_grad():
                         update_result = memory_bank_updater.update_from_text(
                             input_text,
-                            compression_rate=get_cfg_value("memory_compression_rate", 0.4)
+                            compression_rate=get_cfg_value("memory_compression_rate", MemoryUpdateConf.get("memory_compression_rate", 0.4))
                         )
                         
                         if update_result.get("updated_count", 0) > 0:
@@ -656,14 +668,31 @@ def train_epoch_sft(
                             )
                             
                             # 检查是否需要重新聚类 keys
-                            if memory_update_tracker.should_recluster():
-                                Logger("⚠️  更新比例超过阈值，开始重新聚类 keys（将暂停训练）...", accelerator)
+                            current_ratio = memory_update_tracker.get_update_ratio()
+                            should_recluster = memory_update_tracker.should_recluster()
+                            update_ratio_threshold = memory_update_tracker.update_ratio_threshold
+                            Logger(f"[Memory Update] 检查重聚类: 当前比例={current_ratio:.6f}, 阈值={update_ratio_threshold:.6f}, 需要重聚类={should_recluster}", accelerator)
+                            
+                            if should_recluster:
+                                Logger(f"⚠️  [Memory Update] 更新比例超过阈值 ({current_ratio:.6f} >= {update_ratio_threshold:.6f})，开始重新聚类 keys...", accelerator)
                                 
                                 # 同步所有进程，确保训练暂停
                                 accelerator.wait_for_everyone()
                                 
-                                # 重新聚类 keys（同步版本，会阻塞）
+                                # 重新聚类 keys
                                 from utils.keys_recluster import recluster_keys
+                                from config.memory_update import MemoryUpdateConf
+                                
+                                # 获取配置值（支持 ConfigDict 和 dict）
+                                def get_recluster_cfg_value(key, default):
+                                    if memory_update_cfg:
+                                        if isinstance(memory_update_cfg, dict):
+                                            return memory_update_cfg.get(key, MemoryUpdateConf.get(key, default))
+                                        elif hasattr(memory_update_cfg, 'get'):
+                                            return memory_update_cfg.get(key, MemoryUpdateConf.get(key, default))
+                                        else:
+                                            return getattr(memory_update_cfg, key, MemoryUpdateConf.get(key, default))
+                                    return MemoryUpdateConf.get(key, default)
                                 
                                 recluster_result = recluster_keys(
                                     model=unwrapped_model,
@@ -671,12 +700,12 @@ def train_epoch_sft(
                                     valid_mask=unwrapped_model.valid_mask,
                                     num_keys=unwrapped_model.shared_memory_gate.num_keys,
                                     device=str(accelerator.device),
-                                    batch_size=get_cfg_value("keys_recluster_batch_size", 32),
-                                    sample_ratio=get_cfg_value("keys_recluster_sample_ratio", 1.0),
+                                    batch_size=get_recluster_cfg_value("keys_recluster_batch_size", 32),
+                                    sample_ratio=get_recluster_cfg_value("keys_recluster_sample_ratio", 0.01),
                                     accelerator=accelerator
                                 )
                                 
-                                Logger(f"✅ Keys 重新聚类完成: {recluster_result}", accelerator)
+                                Logger(f"✅ [Memory Update] Keys 重新聚类完成: {recluster_result}", accelerator)
                                 
                                 # 重置更新追踪器
                                 memory_update_tracker.reset()

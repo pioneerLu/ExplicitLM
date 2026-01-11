@@ -49,3 +49,7 @@ swanlab/
 .env
 .env.local
 .env.*.local
+
+# Nested git repos (external datasets)
+data/hg_data/MedQA-USMLE-4-options/
+data/hg_data/mmlu/

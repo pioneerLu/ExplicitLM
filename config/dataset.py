@@ -3,7 +3,7 @@ DatasetConf = {
     "dataset_path": "data/database/merged_pretrain.jsonl",  # 预训练数据集路径
     "val_dataset_path": "data/benchmarks/eval_data.jsonl",  # 验证数据集路径
     "max_subject_len": 8,
-    "max_predicate_len": 4,
+    "max_predicate_len": 5,
     "max_object_len": 8,
     # ---- sft 相关字段 ----
     "pretrained_router_path": "",  # Router 预训练权重路径（可选，如 router_only.pt）

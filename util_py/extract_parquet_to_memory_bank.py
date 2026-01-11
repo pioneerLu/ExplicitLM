@@ -571,7 +571,7 @@ def main():
     parser.add_argument("--knowledge-length", type=int, default=32, help="每个knowledge的token长度")
     parser.add_argument("--min-fact-length", type=int, default=10, help="最小fact长度（字符）")
     parser.add_argument("--deduplication", type=str, default="text_hash", choices=["text_hash", "token_hash"], help="去重方法")
-    parser.add_argument("--qwen-model-path", type=str, default="/data2/zengzheni/lvchangwei/new_repo/Qwen/models/Qwen3-4b", help="Qwen模型路径（用于tokenizer）")
+    parser.add_argument("--qwen-model-path", type=str, default="Qwen_hg/Qwen3-4b", help="Qwen模型路径（用于tokenizer，相对于 ExplicitLM 根目录）")
     parser.add_argument("--skip-extract", action="store_true", help="跳过提取阶段（直接合并）")
     parser.add_argument("--skip-merge", action="store_true", help="跳过合并阶段（直接保存）")
     parser.add_argument("--test-mode", action="store_true", help="测试模式：只处理前10个文本")

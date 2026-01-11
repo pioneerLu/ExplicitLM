@@ -2,7 +2,7 @@
 
 # ========== 配置区域 ==========
 # 设置GPU可见设备（平衡显存）
-export CUDA_VISIBLE_DEVICES=0,1,3
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 # 设置PyTorch内存分配配置（保持即可）
 export PYTORCH_ALLOC_CONF=expandable_segments:True
@@ -20,8 +20,10 @@ export TORCH_NCCL_BLOCKING_WAIT=1  # 启用阻塞等待以便调试
 # 设置SwanLab API Key
 export SWANLAB_API_KEY=GtiI1qjU5lco6MKKSrRmN
 
-# 进入项目目录
-cd /data2/zengzheni/lvchangwei/new_repo/ExplicitLM
+# 进入项目目录（使用脚本所在目录的父目录作为项目根目录）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
 
 # 设置进程显示名称（在 nvidia-smi 中显示的名称）
 export PYTHON_PROCESS_NAME="llama-env"
@@ -52,12 +54,15 @@ nvidia-smi --query-gpu=index,name,memory.total,memory.free --format=csv,noheader
 
 # ========== 训练配置 ==========
 
-QWEN3_MODEL_PATH="/data2/zengzheni/lvchangwei/new_repo/Qwen/models/Qwen3-4b"
+# Qwen3 模型路径
+QWEN3_MODEL_PATH="Qwen_hg/Qwen3-4b"
 # 记忆库 cache 路径（.pt 文件）
 CACHE_PATH="data/cache/parquet_extract/memory_bank_batches/kb_parquet.pt"
+# Keys 文件路径（可选，如果提供则从文件加载 keys 进行初始化）
+KEYS_PATH="data/keys_parquet_extract_v2_qwen.pt"
 PRETRAINED_MEMORY_GATE_PATH=""
 # 预训练格式数据路径（Parquet 目录，支持多文件）
-PRETRAIN_DATASET_PATH="/data2/zengzheni/lvchangwei/new_repo/ExplicitLM/data/parquet_data/sample_256"
+PRETRAIN_DATASET_PATH="data/parquet_data/sample_256"
 # 验证数据配置（从训练数据中分割，不使用独立验证数据）
 VAL_SPLIT_RATIO=0.05  
 
@@ -73,13 +78,18 @@ MAX_LENGTH=256         # 最大序列长度（参考 run_sft.sh）
 
 # 训练超参数（参考 run_sft.sh，但 fusion 训练通常使用更高的学习率）
 LEARNING_RATE=1e-4     # Fusion 训练推荐 1e-4
-BATCH_SIZE=4          # 参考 run_sft.sh
+BATCH_SIZE=6          # 参考 run_sft.sh
 ACCUMULATION_STEPS=16 # 参考 run_sft.sh
 EPOCHS=3               # 参考 run_sft.sh
 WARMUP_STEPS=100
 
 # Loss 配置
 SIMILARITY_LOSS_COEF=1.0  # Similarity Loss 基础系数（用于自适应平衡，默认1.0）
+
+# Memory 更新配置
+# 注意：Memory 更新配置现在统一在 config/memory_update.py 中管理
+# 如需修改配置，请编辑 config/memory_update.py 文件
+# 如需通过命令行覆盖，可以添加 --enable_memory_update 等参数
 
 # 输出配置
 OUTPUT_DIR="checkpoints/fusion_pretrain"
@@ -99,6 +109,11 @@ if [ -n "$CACHE_PATH" ]; then
 else
     echo "  - 记忆库 Cache: 未设置（将使用随机初始化）"
 fi
+if [ -n "$KEYS_PATH" ]; then
+    echo "  - Keys 文件: $KEYS_PATH"
+else
+    echo "  - Keys 文件: 未设置（将使用随机初始化或自动聚类）"
+fi
 echo "  - 预训练 MemoryGate: ${PRETRAINED_MEMORY_GATE_PATH:-未设置（将使用随机初始化）}"
 echo "  - 训练数据: $PRETRAIN_DATASET_PATH (Parquet 格式，预训练类型)"
 if [ -n "$VAL_SPLIT_SIZE" ]; then
@@ -117,6 +132,7 @@ echo "  - 批次大小: $BATCH_SIZE"
     echo "  - 候选记忆数: $NUM_CANDIDATES"
     echo "  - 输出目录: $OUTPUT_DIR"
     echo "  - DeepSpeed Stage: 2 (ZeRO-2)"
+    echo "  - Memory 更新: 配置来自 config/memory_update.py (如需修改请编辑该文件)"
     echo ""
 
 # 检查必要文件
@@ -130,6 +146,12 @@ if [ -n "$CACHE_PATH" ] && [ ! -f "$CACHE_PATH" ]; then
     echo "❌ 错误: Cache 文件不存在: $CACHE_PATH"
     echo "请先运行数据转换脚本生成 cache 文件"
     exit 1
+fi
+
+# 检查 Keys 文件（可选，如果为空或不存在则使用随机初始化或自动聚类）
+if [ -n "$KEYS_PATH" ] && [ ! -f "$KEYS_PATH" ]; then
+    echo "⚠️  警告: Keys 文件不存在: $KEYS_PATH"
+    echo "将使用随机初始化或等待自动聚类生成 keys"
 fi
 
 # 检查 MemoryGate 权重（可选，如果为空或不存在则使用随机初始化）
@@ -167,6 +189,11 @@ if [ -n "$CACHE_PATH" ]; then
     TRAIN_ARGS+=(--cache_path "$CACHE_PATH")
 fi
 
+# 添加 keys 路径（如果提供）
+if [ -n "$KEYS_PATH" ]; then
+    TRAIN_ARGS+=(--keys_path "$KEYS_PATH")
+fi
+
 # 添加 MemoryGate 权重路径（如果提供）
 if [ -n "$PRETRAINED_MEMORY_GATE_PATH" ]; then
     TRAIN_ARGS+=(--pretrained_memory_gate_path "$PRETRAINED_MEMORY_GATE_PATH")
@@ -202,6 +229,16 @@ fi
 if [ "$SWANLAB_ONLINE" = true ]; then
     TRAIN_ARGS+=(--swanlab_online)
 fi
+
+# Memory 更新配置
+# 注意：Memory 更新配置现在统一在 config/memory_update.py 中管理
+# train_pretrain.py 会自动从配置文件读取默认值
+# 如需通过命令行覆盖配置，可以取消注释以下行并设置参数：
+# TRAIN_ARGS+=(--enable_memory_update)
+# TRAIN_ARGS+=(--memory_update_frequency 100)
+# TRAIN_ARGS+=(--memory_update_strategy "lru")
+# TRAIN_ARGS+=(--memory_compression_rate 0.4)
+# TRAIN_ARGS+=(--llmlingua_model_path "/path/to/llmlingua")
 
 # 执行训练
 # 注意：train_pretrain.py 使用 argparse，直接运行即可（accelerate launch 会自动处理分布式）

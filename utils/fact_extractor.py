@@ -19,7 +19,7 @@ class FactExtractor:
     
     def __init__(
         self,
-        model_path: str = "/data2/zengzheni/lvchangwei/new_repo/bert/llmlingua-2-bert",
+        model_path: str = "llmlingua-2-bert",  
         compression_rate: float = 0.4,  # 压缩到40%，保留60%的关键信息
         force_tokens: Optional[List[str]] = None,
         chunk_end_tokens: Optional[List[str]] = None,
@@ -42,7 +42,9 @@ class FactExtractor:
         self.compression_rate = compression_rate
         self.force_tokens = force_tokens or ['\n', '.', '!', '?', ',', ':', ';']
         self.chunk_end_tokens = chunk_end_tokens or ['.', '\n', '!', '?']
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        # 优化：LLMLingua 默认使用 CPU，避免占用 GPU 显存
+        # 如果需要使用 GPU，可以在调用时指定 device="cuda"
+        self.device = device or "cpu"  # 默认使用 CPU，避免占用训练 GPU 显存
         
         # 初始化 LLMLingua
         self._init_compressor()

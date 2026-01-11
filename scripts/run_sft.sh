@@ -17,8 +17,10 @@ export CUDA_LAUNCH_BLOCKING=1
 # 设置SwanLab API Key
 export SWANLAB_API_KEY=GtiI1qjU5lco6MKKSrRmN
 
-# 进入项目目录
-cd /data2/zengzheni/lvchangwei/new_repo/ExplicitLM
+# 进入项目目录（使用脚本所在目录的父目录作为项目根目录）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
 
 # 设置进程显示名称（在 nvidia-smi 中显示的名称）
 export PYTHON_PROCESS_NAME="llama-env"
@@ -49,7 +51,7 @@ nvidia-smi --query-gpu=index,name,memory.total,memory.free --format=csv,noheader
 
 # ========== 训练配置 ==========
 
-QWEN3_MODEL_PATH="/data2/zengzheni/lvchangwei/new_repo/Qwen/models/Qwen3-4b" 
+QWEN3_MODEL_PATH="Qwen_hg/Qwen3-4b" 
 # 使用新的 extract 数据（需要先运行转换脚本）
 CACHE_PATH="data/cache/kb_parquet.pt"
 # CACHE_PATH="data/cache/knowledge_cache.pt"  # 旧数据

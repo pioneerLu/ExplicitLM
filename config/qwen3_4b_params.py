@@ -1,6 +1,6 @@
 """
 Qwen3-4B 模型参数配置
-从 /data2/zengzheni/lvchangwei/new_repo/Qwen/models/Qwen3-4b/config.json 提取
+从 Qwen_hg/Qwen3-4b/config.json 提取
 这些参数是固定的，不能修改（用于加载预训练权重）
 """
 

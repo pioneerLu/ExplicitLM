@@ -2,6 +2,7 @@ from .model import ModelConf
 from .dataset import DatasetConf
 from .logging import LoggingConf
 from .training import TrainingConf
+from .memory_update import MemoryUpdateConf
 
 
 def get_default_config():
@@ -9,13 +10,14 @@ def get_default_config():
     获取默认配置字典
     
     返回:
-        dict: 包含 model, dataset, logging, training 四个子配置的字典
+        dict: 包含 model, dataset, logging, training, memory_update 五个子配置的字典
     """
     return {
         "model": ModelConf.copy(),
         "dataset": DatasetConf.copy(),
         "logging": LoggingConf.copy(),
         "training": TrainingConf.copy(),
+        "memory_update": MemoryUpdateConf.copy(),
     }
 
 

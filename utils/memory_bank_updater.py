@@ -298,9 +298,7 @@ class MemoryBankUpdater:
         
         elif self.update_strategy == "similarity":
             # 基于相似度：选择最相似的条目（需要计算embedding相似度）
-            # 这里简化实现，使用随机选择
-            import random
-            return random.sample(available, min(num_indices, len(available)))
+            pass
         
         elif self.update_strategy == "importance":
             # 基于重要性：选择重要性评分最低的条目

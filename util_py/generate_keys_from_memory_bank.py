@@ -44,10 +44,12 @@ def load_memory_bank_batch(batch_path: str):
     if isinstance(data, dict):
         memory_bank = data.get("memory_bank")
         valid_mask = data.get("valid_mask")
+        metadata = data.get("metadata", {})
     else:
         # 如果直接是tensor，假设是memory_bank
         memory_bank = data
         valid_mask = None
+        metadata = {}
     
     if memory_bank is None:
         raise ValueError("无法从文件中找到 memory_bank")
@@ -65,17 +67,20 @@ def load_memory_bank_batch(batch_path: str):
         print(f"  ⚠️  未找到 valid_mask，通过检查全pad条目: {num_valid}/{len(memory_bank)} 个有效条目")
         valid_mask = ~is_all_pad
     
-    return memory_bank, valid_mask
+    return memory_bank, valid_mask, metadata
 
 
 def generate_keys_from_token_ids(
     memory_bank: torch.Tensor,
     valid_mask: torch.Tensor,
-    qwen_model_path: str,
-    output_keys_path: str,
+    qwen_model_path: str = None,
+    output_keys_path: str = None,
     device: str = None,
     batch_size: int = 32,
-    knowledge_num: int = None
+    knowledge_num: int = None,
+    memory_bank_path: str = None,
+    dataset_name: str = None,
+    embedding_layer: torch.nn.Module = None,  # 可选的 embedding 层，如果提供则直接使用
 ):
     """基于 Token IDs 使用 Qwen embedding 层生成 Keys"""
     if device is None:
@@ -84,35 +89,97 @@ def generate_keys_from_token_ids(
         else:
             device = "cpu"
     
-    print(f"📦 加载 Qwen 模型: {qwen_model_path}")
-    
-    # 加载 Qwen 模型（只加载 embedding 层，不需要完整模型）
-    # 使用低精度以节省显存
-    model = AutoModelForCausalLM.from_pretrained(
-        qwen_model_path,
-        trust_remote_code=True,
-        torch_dtype=torch.float32,  # 使用 float32 确保精度
-        device_map="auto" if device == "cuda" else None,
-    )
-    
-    # 获取 embedding 层
-    if hasattr(model, 'get_input_embeddings'):
-        embedding_layer = model.get_input_embeddings()
+    # 如果提供了 embedding_layer，直接使用；否则从模型路径加载
+    if embedding_layer is not None:
+        print(f"📦 使用提供的 embedding 层")
+        # 获取 hidden_size（embedding 维度）
+        embedding_dim = embedding_layer.embedding_dim
+        print(f"  ✅ 嵌入维度: {embedding_dim}")
+        # 将 embedding 层移到指定设备（确保在正确的设备上）
+        # 重要：确保所有参数都在正确的设备上
+        embedding_layer = embedding_layer.to(device)
+        # 确保 embedding 层的权重在正确的设备上
+        if hasattr(embedding_layer, 'weight'):
+            embedding_layer.weight.data = embedding_layer.weight.data.to(device)
     else:
-        embedding_layer = getattr(model, 'embed_tokens', None)
-        if embedding_layer is None:
-            raise ValueError("无法找到模型的 embedding 层")
-    
-    # 获取 hidden_size（embedding 维度）
-    embedding_dim = embedding_layer.embedding_dim
-    print(f"  ✅ 嵌入维度: {embedding_dim}")
-    
-    # 将 embedding 层移到指定设备（确保在正确的设备上）
-    embedding_layer = embedding_layer.to(device)
+        if qwen_model_path is None:
+            raise ValueError("必须提供 qwen_model_path 或 embedding_layer 之一")
+        print(f"📦 加载 Qwen 模型: {qwen_model_path}")
+        
+        # 加载 Qwen 模型（只加载 embedding 层，不需要完整模型）
+        # 使用低精度以节省显存
+        # 注意：如果 qwen_model_path 指向 ExplicitLM 模型，需要特殊处理
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                qwen_model_path,
+                trust_remote_code=True,
+                torch_dtype=torch.float32,  # 使用 float32 确保精度
+                device_map="auto" if device == "cuda" else None,
+            )
+        except Exception as e:
+            # 如果加载失败（可能是 ExplicitLM 模型导致递归），尝试直接加载 Qwen 基础模型
+            # 检查是否是 ExplicitLM 模型路径
+            config_path = os.path.join(qwen_model_path, "config.json")
+            if os.path.exists(config_path):
+                import json
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                    if config.get("model_type") == "explicitlm":
+                        # 这是 ExplicitLM 模型，需要找到基础 Qwen 模型
+                        # 尝试从 checkpoint_info.json 获取
+                        checkpoint_info_path = os.path.join(qwen_model_path, "checkpoint_info.json")
+                        if os.path.exists(checkpoint_info_path):
+                            with open(checkpoint_info_path, 'r') as f2:
+                                checkpoint_info = json.load(f2)
+                                base_qwen_path = checkpoint_info.get("qwen3_path")
+                                if base_qwen_path and os.path.exists(base_qwen_path):
+                                    print(f"   检测到 ExplicitLM 模型，使用基础 Qwen 模型: {base_qwen_path}")
+                                    model = AutoModelForCausalLM.from_pretrained(
+                                        base_qwen_path,
+                                        trust_remote_code=True,
+                                        torch_dtype=torch.float32,
+                                        device_map="auto" if device == "cuda" else None,
+                                    )
+                                else:
+                                    raise ValueError(f"无法找到基础 Qwen 模型路径。错误: {e}")
+                        else:
+                            raise ValueError(f"无法从 ExplicitLM 模型获取基础 Qwen 模型路径。错误: {e}")
+                    else:
+                        raise e
+            else:
+                raise e
+        
+        # 获取 embedding 层
+        if hasattr(model, 'get_input_embeddings'):
+            embedding_layer = model.get_input_embeddings()
+        else:
+            embedding_layer = getattr(model, 'embed_tokens', None)
+            if embedding_layer is None:
+                raise ValueError("无法找到模型的 embedding 层")
+        
+        # 获取 hidden_size（embedding 维度）
+        embedding_dim = embedding_layer.embedding_dim
+        print(f"  ✅ 嵌入维度: {embedding_dim}")
+        
+        # 将 embedding 层移到指定设备（确保在正确的设备上）
+        embedding_layer = embedding_layer.to(device)
     
     # 只处理有效条目
     valid_indices = torch.where(valid_mask)[0].tolist()
     num_valid = len(valid_indices)
+    
+    # 如果没有有效条目，尝试使用所有条目（重新生成 valid_mask）
+    if num_valid == 0:
+        print(f"  ⚠️  Valid Mask 显示没有有效条目，尝试通过检查全pad条目重新生成 valid_mask...")
+        pad_token_id = 0
+        is_all_pad = (memory_bank == pad_token_id).all(dim=-1)
+        valid_mask = ~is_all_pad
+        valid_indices = torch.where(valid_mask)[0].tolist()
+        num_valid = len(valid_indices)
+        if num_valid == 0:
+            raise ValueError(f"Memory Bank 中所有条目都是 pad token（pad_token_id={pad_token_id}），无法生成 Keys")
+        print(f"  ✅ 重新生成了 valid_mask: {num_valid}/{len(valid_mask)} 个有效条目")
+    
     print(f"  📝 处理 {num_valid} 个有效条目...")
     
     # 编码 token IDs 为嵌入向量（批处理）
@@ -123,13 +190,14 @@ def generate_keys_from_token_ids(
     with torch.no_grad():
         for i in tqdm(range(0, num_valid, batch_size), desc="编码"):
             batch_indices = valid_indices[i:i+batch_size]
+            # 确保 batch_token_ids 在正确的设备上（从 CPU 移到目标设备）
             batch_token_ids = memory_bank[batch_indices].to(device)  # [batch_size, knowledge_length]
             
-            # 创建 attention_mask（非 pad token 的位置为 1）
+            # 创建 attention_mask（非 pad token 的位置为 1），确保也在正确的设备上
             pad_token_id = 0
             attention_mask = (batch_token_ids != pad_token_id).long().to(device)
             
-            # 获取 token embeddings
+            # 获取 token embeddings（batch_token_ids 和 embedding_layer 现在都在同一设备上）
             token_embeddings = embedding_layer(batch_token_ids)  # [batch_size, knowledge_length, embedding_dim]
             
             # Mean pooling（考虑 attention_mask）
@@ -139,6 +207,10 @@ def generate_keys_from_token_ids(
             sentence_embeddings = sum_hidden / len_hidden  # [batch_size, embedding_dim]
             
             kb_embeddings_list.append(sentence_embeddings.cpu())
+    
+    # 检查是否有 embeddings
+    if len(kb_embeddings_list) == 0:
+        raise ValueError("没有生成任何 embeddings，无法创建 Keys")
     
     # 合并所有批次的 embeddings
     kb_embeddings = torch.cat(kb_embeddings_list, dim=0)  # [num_valid, embedding_dim]
@@ -168,9 +240,14 @@ def generate_keys_from_token_ids(
     print(f"    ✅ Col Keys 形状: {col_keys.shape}")
     print(f"    ✅ Grid Indices 形状: {grid_indices.shape}")
     
+    if output_keys_path is None:
+        raise ValueError("必须提供 output_keys_path 参数")
+    
     # 保存 Keys（新格式：字典格式，包含 row_keys 和 col_keys）
     print(f"💾 保存 Keys（新格式）: {output_keys_path}")
-    os.makedirs(os.path.dirname(output_keys_path), exist_ok=True)
+    output_dir = os.path.dirname(output_keys_path)
+    if output_dir:  # 如果有目录路径，创建目录
+        os.makedirs(output_dir, exist_ok=True)
     
     # 保存为字典格式，包含 row_keys 和 col_keys（两个独立的 tensor）
     keys_dict = {
@@ -180,13 +257,25 @@ def generate_keys_from_token_ids(
         "num_clusters": num_clusters,
         "embedding_dim": embedding_dim,
         "source": "qwen_embedding",  # 标记使用 Qwen embedding 生成
+        "metadata": {
+            "memory_bank_path": memory_bank_path if memory_bank_path else "unknown",
+            "dataset_name": dataset_name if dataset_name else "unknown",
+        }
     }
     torch.save(keys_dict, output_keys_path)
     print(f"  ✅ Keys 已保存（新格式：字典格式，包含 row_keys 和 col_keys）")
     
-    # 清理模型以释放显存
-    del model
-    del embedding_layer
+    # 清理模型以释放显存（如果是从文件加载的）
+    # 注意：如果 embedding_layer 是从外部提供的（qwen_model_path 为 None），不应该删除它
+    if qwen_model_path is not None:
+        # 这是从文件加载的模型，可以清理
+        try:
+            if 'model' in locals():
+                del model
+            # embedding_layer 是 model 的一部分，删除 model 后会自动释放
+        except:
+            pass
+    
     if device == "cuda":
         torch.cuda.empty_cache()
     
@@ -214,7 +303,7 @@ def main():
     parser.add_argument(
         "--qwen-model-path",
         type=str,
-        default="/data2/zengzheni/lvchangwei/new_repo/Qwen/models/Qwen3-4b",
+        default="Qwen_hg/Qwen3-4b",  # 相对于 ExplicitLM 根目录
         help="Qwen 模型路径（用于 tokenizer）"
     )
     parser.add_argument(
@@ -246,7 +335,18 @@ def main():
     # 步骤 1: 加载 Memory Bank
     print("步骤 1: 加载 Memory Bank Batch")
     print("-" * 60)
-    memory_bank, valid_mask = load_memory_bank_batch(args.memory_bank_path)
+    memory_bank, valid_mask, metadata = load_memory_bank_batch(args.memory_bank_path)
+    
+    # 从 metadata 提取 dataset_name
+    dataset_name = metadata.get("dataset_name") if metadata else None
+    if not dataset_name:
+        # 尝试从路径推断
+        try:
+            parent_dir = os.path.basename(os.path.dirname(os.path.abspath(args.memory_bank_path)))
+            if parent_dir:
+                dataset_name = parent_dir
+        except:
+            pass
     
     # 推断 knowledge_num（如果未提供）
     if args.knowledge_num is None:
@@ -264,7 +364,9 @@ def main():
         args.output_keys_path,
         device=args.device,
         batch_size=args.batch_size,
-        knowledge_num=args.knowledge_num
+        knowledge_num=args.knowledge_num,
+        memory_bank_path=args.memory_bank_path,
+        dataset_name=dataset_name,
     )
     print()
     
