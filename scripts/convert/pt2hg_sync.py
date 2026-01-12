@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 # 添加项目路径
-project_root = Path(__file__).parent.resolve()
+project_root = Path(__file__).parent.parent.parent.resolve()  # scripts/convert -> scripts -> ExplicitLM
 sys.path.insert(0, str(project_root))
 
 # 导入transformers

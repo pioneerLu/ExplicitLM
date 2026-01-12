@@ -81,6 +81,7 @@ def generate_keys_from_token_ids(
     memory_bank_path: str = None,
     dataset_name: str = None,
     embedding_layer: torch.nn.Module = None,  # 可选的 embedding 层，如果提供则直接使用
+    pkm_k: int = 1024,  # 固定的 K 值，与模型配置一致
 ):
     """基于 Token IDs 使用 Qwen embedding 层生成 Keys"""
     if device is None:
@@ -221,14 +222,10 @@ def generate_keys_from_token_ids(
     
     # Residual Quantization（使用新的 FAISS 聚类方法）
     print("🔨 执行 Residual Quantization（使用 FAISS，支持 GPU）...")
-    if knowledge_num is not None:
-        num_clusters = int(np.sqrt(knowledge_num))
-        print(f"  📊 聚类数: {num_clusters} (√{knowledge_num}，基于总知识库大小)")
-        print(f"  📝 注意: 只使用 {len(kb_embeddings)} 个有效条目进行 K-Means，但 keys 数量匹配总知识库大小")
-    else:
-        num_items = len(kb_embeddings)
-        num_clusters = int(np.sqrt(num_items))
-        print(f"  📊 聚类数: {num_clusters} (√{num_items}，基于有效条目数)")
+    # 使用固定的 K 值（与模型配置 pkm_k 一致），确保 keys 形状匹配
+    num_clusters = pkm_k
+    print(f"  📊 聚类数: {num_clusters} (固定值，与模型 pkm_k 配置一致)")
+    print(f"  📝 使用 {len(kb_embeddings)} 个有效条目进行 K-Means 聚类")
     
     # 使用新的聚类方法（FAISS，支持 GPU，内存优化）
     row_keys, col_keys, grid_indices = perform_clustering(
@@ -324,6 +321,12 @@ def main():
         default=None,
         help="知识库总大小（用于确定 keys 数量，默认从 memory_bank 形状推断）"
     )
+    parser.add_argument(
+        "--pkm-k",
+        type=int,
+        default=1024,
+        help="PKM 的 K 值（固定值，与模型 pkm_k 配置一致，默认 1024）"
+    )
     
     args = parser.parse_args()
     
@@ -367,6 +370,7 @@ def main():
         knowledge_num=args.knowledge_num,
         memory_bank_path=args.memory_bank_path,
         dataset_name=dataset_name,
+        pkm_k=args.pkm_k,
     )
     print()
     

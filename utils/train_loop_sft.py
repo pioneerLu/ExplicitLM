@@ -476,54 +476,56 @@ def train_epoch_sft(
     last_log_time = epoch_start_time
     
     # 初始化知识更新组件（如果启用）
-    # 如果已经传入初始化的对象，则使用传入的；否则在函数内部初始化（向后兼容）
-    if memory_bank_updater is None or memory_update_tracker is None:
-    # 检查是否有 memory_update 配置（兼容旧配置）
     memory_update_cfg = getattr(args, 'memory_update', None)
     if memory_update_cfg is None:
-        # 如果没有 memory_update 配置，尝试从 args 中获取（兼容性）
         memory_update_cfg = args.get('memory_update', {}) if hasattr(args, 'get') else {}
     
-    if memory_update_cfg and memory_update_cfg.get("enable_memory_update_during_training", False):
+    # 全局标志：所有进程都需要知道是否启用 Memory Update
+    memory_update_enabled = False
+    if memory_update_cfg:
+        if isinstance(memory_update_cfg, dict):
+            memory_update_enabled = memory_update_cfg.get("enable_memory_update_during_training", False)
+        elif hasattr(memory_update_cfg, 'get'):
+            memory_update_enabled = memory_update_cfg.get("enable_memory_update_during_training", False)
+        else:
+            memory_update_enabled = getattr(memory_update_cfg, "enable_memory_update_during_training", False)
+    
+    if memory_update_enabled and (memory_bank_updater is None or memory_update_tracker is None):
         from utils.memory_bank_updater import MemoryBankUpdater
         from utils.fact_extractor import FactExtractor
-            from config.memory_update import MemoryUpdateConf
+        from config.memory_update import MemoryUpdateConf
         
-        # 只在主进程初始化（避免重复初始化）
+        # 只在主进程初始化
         if accelerator.is_main_process:
-            # 获取配置值（支持 ConfigDict 和 dict）
             def get_cfg_value(key, default):
-                    if isinstance(memory_update_cfg, dict):
-                        return memory_update_cfg.get(key, default)
-                    elif hasattr(memory_update_cfg, 'get'):
-                    return memory_update_cfg.get(key, default)
+                if isinstance(memory_update_cfg, dict):
+                    return memory_update_cfg.get(key, MemoryUpdateConf.get(key, default))
+                elif hasattr(memory_update_cfg, 'get'):
+                    return memory_update_cfg.get(key, MemoryUpdateConf.get(key, default))
                 else:
-                    return getattr(memory_update_cfg, key, default)
+                    return getattr(memory_update_cfg, key, MemoryUpdateConf.get(key, default))
             
-                if memory_bank_updater is None:
-            fact_extractor = FactExtractor(
-                        model_path=get_cfg_value("llmlingua_model_path", MemoryUpdateConf.get("llmlingua_model_path", "llmlingua-2-bert")),
-                        compression_rate=get_cfg_value("memory_compression_rate", MemoryUpdateConf.get("memory_compression_rate", 0.4))
-            )
+            if memory_bank_updater is None:
+                fact_extractor = FactExtractor(
+                    model_path=get_cfg_value("llmlingua_model_path", "llmlingua-2-bert"),
+                    compression_rate=get_cfg_value("memory_compression_rate", 0.4)
+                )
+                memory_bank_updater = MemoryBankUpdater(
+                    model=unwrapped_model,
+                    tokenizer=tokenizer,
+                    fact_extractor=fact_extractor,
+                    update_strategy=get_cfg_value("memory_update_strategy", "lru")
+                )
             
-            memory_bank_updater = MemoryBankUpdater(
-                model=unwrapped_model,
-                tokenizer=tokenizer,
-                fact_extractor=fact_extractor,
-                        update_strategy=get_cfg_value("memory_update_strategy", MemoryUpdateConf.get("memory_update_strategy", "lru"))
-            )
+            if memory_update_tracker is None:
+                total_valid_entries = unwrapped_model.valid_mask.sum().item() if hasattr(unwrapped_model, 'valid_mask') else unwrapped_model.memory_bank.shape[0]
+                memory_update_tracker = MemoryUpdateTracker(
+                    total_valid_entries=total_valid_entries,
+                    update_ratio_threshold=get_cfg_value("keys_recluster_update_ratio_threshold", 0.1)
+                )
             
-                if memory_update_tracker is None:
-            # 初始化更新追踪器
-            total_valid_entries = unwrapped_model.valid_mask.sum().item() if hasattr(unwrapped_model, 'valid_mask') else unwrapped_model.memory_bank.shape[0]
-            memory_update_tracker = MemoryUpdateTracker(
-                total_valid_entries=total_valid_entries,
-                        update_ratio_threshold=get_cfg_value("keys_recluster_update_ratio_threshold", MemoryUpdateConf.get("keys_recluster_update_ratio_threshold", 0.1))
-            )
-            
-                Logger(f"知识更新组件初始化完成: 更新频率={get_cfg_value('memory_update_frequency', MemoryUpdateConf.get('memory_update_frequency', 100))}, 重聚阈值={get_cfg_value('keys_recluster_update_ratio_threshold', MemoryUpdateConf.get('keys_recluster_update_ratio_threshold', 0.1))}", accelerator)
+            Logger(f"Memory Update 初始化完成", accelerator)
         
-        # 同步所有进程（确保主进程初始化完成）
         accelerator.wait_for_everyone()
 
     if accelerator.is_main_process and TQDM_AVAILABLE:
@@ -612,129 +614,132 @@ def train_epoch_sft(
         # PyTorch 和现代 GPU 驱动的内存管理已经足够智能，无需手动干预
         # 如果遇到 OOM 错误，可以考虑在训练前优化批次大小或模型参数
         
-        # 知识更新和 Keys 重新聚类（如果启用）
-        if memory_bank_updater is not None and memory_update_tracker is not None and accelerator.is_main_process:
+        # ========== Memory Bank 更新 ==========
+        # 使用 memory_update_enabled 而非 memory_bank_updater（后者仅主进程有值）
+        if memory_update_enabled:
             from config.memory_update import MemoryUpdateConf
             
-            # 获取配置值（支持 ConfigDict 和 dict），使用 MemoryUpdateConf 作为默认值
             def get_cfg_value(key, default):
                 if memory_update_cfg:
                     if isinstance(memory_update_cfg, dict):
                         return memory_update_cfg.get(key, MemoryUpdateConf.get(key, default))
                     elif hasattr(memory_update_cfg, 'get'):
                         return memory_update_cfg.get(key, MemoryUpdateConf.get(key, default))
-                else:
+                    else:
                         return getattr(memory_update_cfg, key, MemoryUpdateConf.get(key, default))
                 return MemoryUpdateConf.get(key, default)
             
-            update_frequency = get_cfg_value("memory_update_frequency", MemoryUpdateConf.get("memory_update_frequency", 0))
+            update_frequency = get_cfg_value("memory_update_frequency", 0)
             
-            # 按频率进行知识更新
-            if update_frequency > 0 and (step + 1) % update_frequency == 0:
-                # 使用原始文本（如果可用），否则从 token IDs 解码
-                try:
-                    if prompt_texts is not None and len(prompt_texts) > 0:
-                        # 新格式：直接使用原始文本（只处理第一个样本）
-                        input_text = prompt_texts[0]
-                    else:
-                        # 旧格式兼容：从 token IDs 解码
-                        sample_token_ids = X[0].cpu().tolist()
-                        pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-                        # 移除 padding tokens
-                        while sample_token_ids and sample_token_ids[-1] == pad_token_id:
-                            sample_token_ids.pop()
-                        input_text = tokenizer.decode(sample_token_ids, skip_special_tokens=True)
+            accelerator.wait_for_everyone()
+            
+            try:
+                # 广播是否需要更新
+                if accelerator.is_main_process:
+                    should_update_value = 1 if (update_frequency > 0 and (step + 1) % update_frequency == 0) else 0
+                    should_update_tensor = torch.tensor(should_update_value, dtype=torch.long, device=accelerator.device)
+                else:
+                    should_update_tensor = torch.tensor(0, dtype=torch.long, device=accelerator.device)
+                
+                if accelerator.num_processes > 1:
+                    import torch.distributed as dist
+                    dist.broadcast(should_update_tensor, src=0)
+                
+                should_update = bool(should_update_tensor.item())
+                should_sync_memory_bank = False
+                should_sync_keys = False
+                
+                if should_update:
+                    # 主进程执行更新
+                    if accelerator.is_main_process and memory_bank_updater is not None:
+                        try:
+                            if prompt_texts is not None and len(prompt_texts) > 0:
+                                input_text = prompt_texts[0]
+                            else:
+                                decoded_texts = tokenizer.batch_decode(X.cpu().tolist(), skip_special_tokens=True)
+                                input_text = next((t for t in decoded_texts if t and t.strip()), None)
+                            
+                            if input_text and input_text.strip():
+                                with torch.no_grad():
+                                    update_result = memory_bank_updater.update_from_text(
+                                        input_text, compression_rate=get_cfg_value("memory_compression_rate", 0.4)
+                                    )
+                                    
+                                    if update_result.get("updated_count", 0) > 0:
+                                        memory_update_tracker.record_update(update_result)
+                                        Logger(f"✅ Memory Bank 已更新: {update_result['updated_count']} 条事实", accelerator)
+                                        should_sync_memory_bank = True
+                                        
+                                        if memory_update_tracker.should_recluster():
+                                            from utils.keys_recluster import recluster_keys
+                                            recluster_keys(
+                                                model=unwrapped_model,
+                                                memory_bank=unwrapped_model.memory_bank,
+                                                valid_mask=unwrapped_model.valid_mask,
+                                                num_keys=unwrapped_model.shared_memory_gate.num_keys,
+                                                device=str(accelerator.device),
+                                                batch_size=get_cfg_value("keys_recluster_batch_size", 32),
+                                                sample_ratio=get_cfg_value("keys_recluster_sample_ratio", 0.01),
+                                                accelerator=None
+                                            )
+                                            memory_update_tracker.reset()
+                                            should_sync_keys = True
+                                            Logger("✅ Keys 重聚类完成", accelerator)
+                        except Exception as e:
+                            Logger(f"❌ Memory Update 失败: {e}", accelerator)
                     
-                    # 跳过空文本
-                    if not input_text or not input_text.strip():
-                        continue
-                    
-                    # 更新记忆库
-                    with torch.no_grad():
-                        update_result = memory_bank_updater.update_from_text(
-                            input_text,
-                            compression_rate=get_cfg_value("memory_compression_rate", MemoryUpdateConf.get("memory_compression_rate", 0.4))
-                        )
+                    # 多卡同步
+                    if accelerator.num_processes > 1:
+                        accelerator.wait_for_everyone()
                         
-                        if update_result.get("updated_count", 0) > 0:
-                            # 记录更新
-                            memory_update_tracker.record_update(update_result)
+                        # 同步 Memory Bank
+                        sync_mb_flag = torch.tensor([1 if should_sync_memory_bank else 0], dtype=torch.int, device=accelerator.device)
+                        if not accelerator.is_main_process:
+                            sync_mb_flag.zero_()
+                        dist.broadcast(sync_mb_flag, src=0)
+                        
+                        if sync_mb_flag.item() == 1:
+                            mb_shape = unwrapped_model.memory_bank.shape
+                            chunk_size = 5000
                             
-                            Logger(
-                                f"记忆库已更新: {update_result['updated_count']} 条事实, "
-                                f"当前更新比例: {memory_update_tracker.get_update_ratio():.4f} "
-                                f"({memory_update_tracker.get_updated_count()}/{memory_update_tracker.total_valid_entries})",
-                                accelerator
-                            )
+                            for start in range(0, mb_shape[0], chunk_size):
+                                end = min(start + chunk_size, mb_shape[0])
+                                if accelerator.is_main_process:
+                                    chunk = unwrapped_model.memory_bank[start:end].clone().to(accelerator.device)
+                                else:
+                                    chunk = torch.zeros(end - start, mb_shape[1], dtype=torch.int64, device=accelerator.device)
+                                dist.broadcast(chunk, src=0)
+                                unwrapped_model.memory_bank[start:end] = chunk.cpu()
                             
-                            # 检查是否需要重新聚类 keys
-                            current_ratio = memory_update_tracker.get_update_ratio()
-                            should_recluster = memory_update_tracker.should_recluster()
-                            update_ratio_threshold = memory_update_tracker.update_ratio_threshold
-                            Logger(f"[Memory Update] 检查重聚类: 当前比例={current_ratio:.6f}, 阈值={update_ratio_threshold:.6f}, 需要重聚类={should_recluster}", accelerator)
+                            if accelerator.is_main_process:
+                                vm = unwrapped_model.valid_mask.clone().to(accelerator.device)
+                            else:
+                                vm = torch.zeros(mb_shape[0], dtype=torch.bool, device=accelerator.device)
+                            dist.broadcast(vm, src=0)
+                            unwrapped_model.valid_mask.copy_(vm.cpu())
                             
-                            if should_recluster:
-                                Logger(f"⚠️  [Memory Update] 更新比例超过阈值 ({current_ratio:.6f} >= {update_ratio_threshold:.6f})，开始重新聚类 keys...", accelerator)
-                                
-                                # 同步所有进程，确保训练暂停
-                                accelerator.wait_for_everyone()
-                                
-                                # 重新聚类 keys
-                                from utils.keys_recluster import recluster_keys
-                                from config.memory_update import MemoryUpdateConf
-                                
-                                # 获取配置值（支持 ConfigDict 和 dict）
-                                def get_recluster_cfg_value(key, default):
-                                    if memory_update_cfg:
-                                        if isinstance(memory_update_cfg, dict):
-                                            return memory_update_cfg.get(key, MemoryUpdateConf.get(key, default))
-                                        elif hasattr(memory_update_cfg, 'get'):
-                                            return memory_update_cfg.get(key, MemoryUpdateConf.get(key, default))
-                                        else:
-                                            return getattr(memory_update_cfg, key, MemoryUpdateConf.get(key, default))
-                                    return MemoryUpdateConf.get(key, default)
-                                
-                                recluster_result = recluster_keys(
-                                    model=unwrapped_model,
-                                    memory_bank=unwrapped_model.memory_bank,
-                                    valid_mask=unwrapped_model.valid_mask,
-                                    num_keys=unwrapped_model.shared_memory_gate.num_keys,
-                                    device=str(accelerator.device),
-                                    batch_size=get_recluster_cfg_value("keys_recluster_batch_size", 32),
-                                    sample_ratio=get_recluster_cfg_value("keys_recluster_sample_ratio", 0.01),
-                                    accelerator=accelerator
-                                )
-                                
-                                Logger(f"✅ [Memory Update] Keys 重新聚类完成: {recluster_result}", accelerator)
-                                
-                                # 重置更新追踪器
-                                memory_update_tracker.reset()
-                                
-                                # 同步 keys 到所有进程（如果使用分布式训练）
-                                if accelerator.num_processes > 1:
-                                    Logger("同步 keys 到所有进程...", accelerator)
-                                    # 获取 keys
-                                    row_keys = unwrapped_model.shared_memory_gate.row_keys
-                                    col_keys = unwrapped_model.shared_memory_gate.col_keys
-                                    
-                                    # 广播 keys 到所有进程
-                                    keys_tensor = torch.stack([row_keys, col_keys])
-                                    keys_tensor = accelerator.broadcast(keys_tensor, from_process=0)
-                                    
-                                    # 更新所有进程的模型
-                                    new_row_keys = keys_tensor[0]
-                                    new_col_keys = keys_tensor[1]
-                                    unwrapped_model.shared_memory_gate.update_keys(new_row_keys, new_col_keys)
-                                    
-                                    Logger("Keys 同步完成", accelerator)
-                                
-                                # 同步所有进程，继续训练
-                                accelerator.wait_for_everyone()
-                                
-                except Exception as e:
-                    Logger(f"⚠️  知识更新失败 (step {step}): {e}", accelerator)
-                    import traceback
-                    Logger(traceback.format_exc(), accelerator)
+                            if accelerator.is_main_process:
+                                Logger("✅ Memory Bank 同步完成", accelerator)
+                        
+                        # 同步 Keys
+                        sync_keys_flag = torch.tensor([1 if should_sync_keys else 0], dtype=torch.int, device=accelerator.device)
+                        if not accelerator.is_main_process:
+                            sync_keys_flag.zero_()
+                        dist.broadcast(sync_keys_flag, src=0)
+                        
+                        if sync_keys_flag.item() == 1:
+                            gate = unwrapped_model.shared_memory_gate
+                            if accelerator.is_main_process:
+                                keys_data = torch.stack([gate.row_keys, gate.col_keys]).to(accelerator.device)
+                            else:
+                                keys_data = torch.zeros(2, gate.num_keys, gate.input_dim, dtype=torch.float32, device=accelerator.device)
+                            dist.broadcast(keys_data, src=0)
+                            gate.update_keys(keys_data[0], keys_data[1])
+                            
+                            if accelerator.is_main_process:
+                                Logger("✅ Keys 同步完成", accelerator)
+            finally:
+                accelerator.wait_for_everyone()
 
         # 更新进度条 - 只在主进程
         if accelerator.is_main_process and pbar is not None:

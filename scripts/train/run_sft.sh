@@ -4,7 +4,7 @@
 
 # ========== 配置区域 ==========
 # 设置GPU可见设备（平衡显存）
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=3,5,7
 
 # 设置PyTorch内存分配配置
 export PYTORCH_ALLOC_CONF=expandable_segments:True
@@ -17,9 +17,9 @@ export CUDA_LAUNCH_BLOCKING=1
 # 设置SwanLab API Key
 export SWANLAB_API_KEY=GtiI1qjU5lco6MKKSrRmN
 
-# 进入项目目录（使用脚本所在目录的父目录作为项目根目录）
+# 进入项目目录（脚本在 scripts/train/ 下，项目根目录是 ../..）
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
 # 设置进程显示名称（在 nvidia-smi 中显示的名称）
@@ -53,7 +53,7 @@ nvidia-smi --query-gpu=index,name,memory.total,memory.free --format=csv,noheader
 
 QWEN3_MODEL_PATH="Qwen_hg/Qwen3-4b" 
 # 使用新的 extract 数据（需要先运行转换脚本）
-CACHE_PATH="data/cache/kb_parquet.pt"
+CACHE_PATH="data/cache/parquet_extract/memory_bank_batches/kb_parquet.pt"
 # CACHE_PATH="data/cache/knowledge_cache.pt"  # 旧数据
 PRETRAINED_ROUTER_PATH=""  # Router 预训练权重路径（可选）
 PRETRAINED_FUSION_PATH=""  # Fusion 预训练权重路径（可选）
@@ -146,7 +146,7 @@ echo "训练日志将保存到: $LOG_FILE"
 echo "nohup 输出将保存到: $NOHUP_FILE"
 echo ""
 
-nohup $ACCELERATE_CMD train_sft.py \
+nohup $ACCELERATE_CMD scripts/train/train_sft.py \
     model.qwen3_model_path="$QWEN3_MODEL_PATH" \
     model.cache_path="$CACHE_PATH" \
     model.recompute_cache=False \

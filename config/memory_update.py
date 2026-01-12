@@ -1,7 +1,7 @@
 # Memory Bank 更新配置（普通字典）
 MemoryUpdateConf = {
     # ---- 知识更新开关 ----
-    "enable_memory_update_during_training": False,  # 是否启用训练时知识更新
+    "enable_memory_update_during_training": True,  # 是否启用训练时知识更新
     
     # ---- 知识更新参数 ----
     "memory_update_frequency": 1,  # 每N个step更新一次

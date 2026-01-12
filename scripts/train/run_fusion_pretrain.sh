@@ -2,7 +2,7 @@
 
 # ========== 配置区域 ==========
 # 设置GPU可见设备（平衡显存）
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=3,5,7
 
 # 设置PyTorch内存分配配置（保持即可）
 export PYTORCH_ALLOC_CONF=expandable_segments:True
@@ -20,9 +20,9 @@ export TORCH_NCCL_BLOCKING_WAIT=1  # 启用阻塞等待以便调试
 # 设置SwanLab API Key
 export SWANLAB_API_KEY=GtiI1qjU5lco6MKKSrRmN
 
-# 进入项目目录（使用脚本所在目录的父目录作为项目根目录）
+# 进入项目目录（脚本在 scripts/train/ 下，项目根目录是 ../..）
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
 # 设置进程显示名称（在 nvidia-smi 中显示的名称）
@@ -78,9 +78,9 @@ MAX_LENGTH=256         # 最大序列长度（参考 run_sft.sh）
 
 # 训练超参数（参考 run_sft.sh，但 fusion 训练通常使用更高的学习率）
 LEARNING_RATE=1e-4     # Fusion 训练推荐 1e-4
-BATCH_SIZE=6          # 参考 run_sft.sh
+BATCH_SIZE=2          # 参考 run_sft.sh
 ACCUMULATION_STEPS=16 # 参考 run_sft.sh
-EPOCHS=3               # 参考 run_sft.sh
+EPOCHS=1               # 参考 run_sft.sh
 WARMUP_STEPS=100
 
 # Loss 配置
@@ -231,18 +231,30 @@ if [ "$SWANLAB_ONLINE" = true ]; then
 fi
 
 # Memory 更新配置
-# 注意：Memory 更新配置现在统一在 config/memory_update.py 中管理
-# train_pretrain.py 会自动从配置文件读取默认值
-# 如需通过命令行覆盖配置，可以取消注释以下行并设置参数：
-# TRAIN_ARGS+=(--enable_memory_update)
-# TRAIN_ARGS+=(--memory_update_frequency 100)
-# TRAIN_ARGS+=(--memory_update_strategy "lru")
-# TRAIN_ARGS+=(--memory_compression_rate 0.4)
-# TRAIN_ARGS+=(--llmlingua_model_path "/path/to/llmlingua")
+# 启用 Memory Bank 动态更新功能
+ENABLE_MEMORY_UPDATE=true
+MEMORY_UPDATE_FREQUENCY=500        # 每50步更新一次
+MEMORY_UPDATE_STRATEGY="lru"      # 更新策略：fifo, lru, random, importance
+MEMORY_COMPRESSION_RATE=0.4       # 事实压缩率（0-1，越小保留信息越多）
+LLMLINGUA_MODEL_PATH="llmlingua-2-bert"  # LLMLingua 模型路径
+
+if [ "$ENABLE_MEMORY_UPDATE" = true ]; then
+    echo "  - Memory 更新: 已启用"
+    echo "    - 更新频率: 每 $MEMORY_UPDATE_FREQUENCY 步"
+    echo "    - 更新策略: $MEMORY_UPDATE_STRATEGY"
+    echo "    - 压缩率: $MEMORY_COMPRESSION_RATE"
+    TRAIN_ARGS+=(--enable_memory_update)
+    TRAIN_ARGS+=(--memory_update_frequency "$MEMORY_UPDATE_FREQUENCY")
+    TRAIN_ARGS+=(--memory_update_strategy "$MEMORY_UPDATE_STRATEGY")
+    TRAIN_ARGS+=(--memory_compression_rate "$MEMORY_COMPRESSION_RATE")
+    TRAIN_ARGS+=(--llmlingua_model_path "$LLMLINGUA_MODEL_PATH")
+else
+    echo "  - Memory 更新: 已禁用"
+fi
 
 # 执行训练
 # 注意：train_pretrain.py 使用 argparse，直接运行即可（accelerate launch 会自动处理分布式）
-nohup $ACCELERATE_CMD train_pretrain.py "${TRAIN_ARGS[@]}" \
+nohup $ACCELERATE_CMD scripts/train/train_pretrain.py "${TRAIN_ARGS[@]}" \
     > "$LOG_FILE" 2>&1 &
 
 TRAIN_PID=$!

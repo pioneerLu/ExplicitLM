@@ -42,24 +42,16 @@ Qwen/Qwen3-4B-Instruct
 
 ### 使用便捷脚本
 
-项目提供了便捷的训练脚本，位于 `scripts/` 目录：
+项目提供了便捷的训练脚本，位于 `scripts/train/` 目录：
 
-**记忆组件训练**：
+**SFT 数据训练**：
 ```bash
-
-bash scripts/run_sft.sh
+bash scripts/train/run_sft.sh
 ```
 
-**MemoryGate (Router) 训练**：
+**Pretrain 数据训练**：
 ```bash
-bash scripts/run_router.sh
-```
-
-**数据格式转换**：
-```bash
-uv run python scripts/convert_omcq_to_sft.py \
-    --input sft_data/omcq_trex_data.json \
-    --output sft_data/omcq_trex_sft.jsonl
+bash scripts/train/run_fusion_pretrain.sh
 ```
 
 ### 直接使用命令行
@@ -68,7 +60,7 @@ uv run python scripts/convert_omcq_to_sft.py \
 ```bash
 export CUDA_VISIBLE_DEVICES=4,5
 
-uv run accelerate launch --config_file accelerate_config.yaml train_sft.py \
+uv run accelerate launch --config_file accelerate_config.yaml scripts/train/train_sft.py \
     model.qwen3_model_path=<YOUR_QWEN3_MODEL_PATH> \
     model.cache_path=data/cache/knowledge_cache.pt \
     model.keys_path=data/keys.pt \
@@ -113,7 +105,7 @@ uv run accelerate launch --config_file accelerate_config.yaml train_sft.py \
 
 生成缓存文件：
 ```bash
-python train_pretrain.py \
+python scripts/train/train_pretrain.py \
     --qwen3_model_path=<YOUR_QWEN3_MODEL_PATH> \
     --database_init_path=data/knowledge_base/sentence_trex_data.json \
     --output_cache_path=data/cache/knowledge_cache.pt
@@ -125,7 +117,7 @@ Keys 文件（`keys.pt`）是 Product Key Memory 的查询键，通常通过 K-M
 
 生成 keys 文件：
 ```bash
-python convert_conversations_to_labeled.py \
+python scripts/convert/convert_conversations_to_labeled.py \
     --conversations_path=data/train.jsonl \
     --kb_path=data/knowledge_base/sentence_trex_data.json \
     --output_path=data/train_labeled.jsonl \
@@ -147,7 +139,7 @@ bash scripts/run_fusion_pretrain.sh
 或直接使用命令行：
 ```bash
 export CUDA_VISIBLE_DEVICES=4,5,6,7
-uv run accelerate launch --config_file accelerate_config.yaml train_pretrain.py \
+uv run accelerate launch --config_file accelerate_config.yaml scripts/train/train_pretrain.py \
     --qwen3_model_path=<YOUR_QWEN3_MODEL_PATH> \
     --pretrained_memory_gate_path=router_only.pt \
     --dataset_path=data/parquet_data/256 \
@@ -173,7 +165,7 @@ bash scripts/run_sft.sh
 或直接使用命令行：
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1
-uv run accelerate launch --config_file accelerate_config.yaml train_sft.py \
+uv run accelerate launch --config_file accelerate_config.yaml scripts/train/train_sft.py \
     model.qwen3_model_path=<YOUR_QWEN3_MODEL_PATH> \
     model.cache_path=data/cache/knowledge_cache.pt \
     model.keys_path=data/keys.pt \
@@ -340,7 +332,7 @@ PyTorch 格式的二进制文件，包含 Product Key Memory 的查询键。
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1
 
-uv run accelerate launch --config_file accelerate_config.yaml train_sft.py \
+uv run accelerate launch --config_file accelerate_config.yaml scripts/train/train_sft.py \
     model.qwen3_model_path=/data/models/Qwen3-4b \
     model.cache_path=/data/cache/knowledge_cache.pt \
     model.keys_path=/data/keys.pt \
@@ -357,7 +349,7 @@ uv run accelerate launch --config_file accelerate_config.yaml train_sft.py \
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1
 
-uv run accelerate launch --config_file accelerate_config.yaml train_sft.py \
+uv run accelerate launch --config_file accelerate_config.yaml scripts/train/train_sft.py \
     model.qwen3_model_path=/data/models/Qwen3-4b \
     model.cache_path=/data/cache/knowledge_cache.pt \
     model.keys_path=/data/keys.pt \
@@ -375,7 +367,7 @@ uv run accelerate launch --config_file accelerate_config.yaml train_sft.py \
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1
 
-uv run accelerate launch --config_file accelerate_config.yaml train_sft.py \
+uv run accelerate launch --config_file accelerate_config.yaml scripts/train/train_sft.py \
     model.qwen3_model_path=/data/models/Qwen3-4b \
     model.cache_path=/data/cache/knowledge_cache.pt \
     model.keys_path=/data/keys.pt \
@@ -402,10 +394,10 @@ uv run accelerate launch --config_file accelerate_config.yaml train_sft.py \
 
 ### Keys 文件生成
 
-使用 `convert_conversations_to_labeled.py` 脚本生成：
+使用 `scripts/convert/convert_conversations_to_labeled.py` 脚本生成：
 
 ```bash
-python convert_conversations_to_labeled.py \
+python scripts/convert/convert_conversations_to_labeled.py \
     --conversations_path=data/train.jsonl \
     --kb_path=data/knowledge_base/sentence_trex_data.json \
     --output_path=data/train_labeled.jsonl \
@@ -456,27 +448,37 @@ training.learning_rate=5e-5
 使用 `accelerate launch` 和 `accelerate_config.yaml`：
 
 ```bash
-uv run accelerate launch --config_file accelerate_config.yaml train_memory.py ...
+uv run accelerate launch --config_file accelerate_config.yaml scripts/train/train_sft.py ...
 ```
 
 数据加载器会自动使用 `num_workers=0` 以避免 NCCL 同步问题。
 
 ## 相关文档
 
-- [记忆组件训练详细指南](docs/SFT_TRAINING.md)
-- [Git 提交指南](GIT_COMMIT_GUIDE.md)
+- [项目功能总览](PROJECT_FEATURES.md)
+- [模型转换与推理指南](CONVERT_AND_INFERENCE_GUIDE.md)
+- [记忆库分离设计](MEMORY_BANK_SEPARATION_DESIGN.md)
+- [环境配置](ENVIRONMENT_SETUP.md)
 
 ## 项目结构
 
 ```
 ExplicitLM/
-├── models/              # 模型架构
-│   ├── core/           # 核心模型
-│   └── memory_bank/    # 记忆库组件
-├── config/             # 配置模块
-├── utils/              # 工具函数
-├── scripts/            # 启动脚本
-├── train_sft.py        # SFT 数据训练（对话格式）
-├── train_pretrain.py   # Pretrain 数据训练（纯文本格式）
-└── pyproject.toml      # 项目依赖
+├── models/                    # 模型架构
+│   ├── core/                 # 核心模型 (ExplicitLM, Qwen3ExplicitLMBlock)
+│   ├── layers/               # 基础层 (RMSNorm)
+│   └── memory_bank/          # 记忆库组件 (MemoryGate, GatedMemoryFusion)
+├── config/                    # 配置模块
+├── utils/                     # 训练工具 (数据加载, 模型初始化, 训练循环)
+├── util_py/                   # 数据预处理工具 (Keys 生成, Memory Bank 提取)
+├── scripts/                   # 可执行脚本
+│   ├── train/                # 训练脚本 (train_sft.py, train_pretrain.py)
+│   ├── convert/              # 转换脚本 (pt2hg_apart.py, pt2hg_sync.py)
+│   └── inference/            # 推理脚本 (chat_example.py)
+├── tests/                     # 测试脚本
+├── examples/                  # 示例代码 (quick_start.py)
+├── docs/                      # 技术文档
+├── data/                      # 数据目录
+│   └── pt_factorys/          # Memory Bank 生成脚本
+└── pyproject.toml            # 项目依赖
 ```

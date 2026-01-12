@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 # 添加项目路径
-project_root = Path(__file__).parent.resolve()
+project_root = Path(__file__).parent.parent.parent.resolve()  # scripts/convert -> scripts -> ExplicitLM
 sys.path.insert(0, str(project_root))
 
 # 导入transformers
@@ -885,6 +885,9 @@ def convert_to_hf_format(
         raise
     
     # 7. 加载并保存Memory Bank（如果提供）
+    # 先创建输出目录
+    os.makedirs(output_path, exist_ok=True)
+    
     memory_bank_saved = False
     if memory_bank_path and os.path.exists(memory_bank_path):
         print(f"\n📥 步骤7: 加载Memory Bank数据...")
@@ -1619,8 +1622,8 @@ def _copy_core_files_to_model_dir(output_path: str):
     import shutil
     from pathlib import Path
     
-    # 项目根目录
-    project_root = Path(__file__).parent.resolve()
+    # 项目根目录 (scripts/convert -> scripts -> ExplicitLM)
+    project_root = Path(__file__).parent.parent.parent.resolve()
     
     # 目标目录
     target_models_dir = Path(output_path) / "models"
@@ -1924,11 +1927,21 @@ def main():
     # 使用 apply_chat_template 格式化输入（如果 tokenizer 支持）
     if hasattr(tokenizer, 'apply_chat_template') and tokenizer.chat_template:
         messages = [{"role": "user", "content": prompt}]
-        formatted_prompt = tokenizer.apply_chat_template(
-            messages, 
-            tokenize=False, 
-            add_generation_prompt=True
-        )
+        # Qwen3 支持 enable_thinking 参数，设为 False 禁用 <think> 标签
+        try:
+            formatted_prompt = tokenizer.apply_chat_template(
+                messages, 
+                tokenize=False, 
+                add_generation_prompt=True,
+                enable_thinking=False  # 禁用 thinking 模式
+            )
+        except TypeError:
+            # 如果 tokenizer 不支持 enable_thinking 参数，回退到默认行为
+            formatted_prompt = tokenizer.apply_chat_template(
+                messages, 
+                tokenize=False, 
+                add_generation_prompt=True
+            )
     else:
         formatted_prompt = prompt
     
@@ -2018,8 +2031,8 @@ def main():
     
     args = parser.parse_args()
     
-    # 获取 ExplicitLM 项目根目录
-    explicitlm_root = Path(__file__).parent.resolve()
+    # 获取 ExplicitLM 项目根目录 (scripts/convert -> scripts -> ExplicitLM)
+    explicitlm_root = Path(__file__).parent.parent.parent.resolve()
     
     # 自动生成输出路径（如果未指定）
     if args.output_path is None:

@@ -445,6 +445,9 @@ def main():
     # 如果命令行没有指定 --enable_memory_update，则使用配置文件的值
     enable_memory_update = args.enable_memory_update if args.enable_memory_update else MemoryUpdateConf.get("enable_memory_update_during_training", False)
     
+    # 🔴 标记是否启用 Memory Update（所有进程都需要知道）
+    memory_update_enabled = enable_memory_update
+    
     if enable_memory_update:
         from utils.memory_bank_updater import MemoryBankUpdater
         from utils.fact_extractor import FactExtractor
@@ -670,17 +673,13 @@ def main():
                             train_memory_gate=not has_pretrained_memory_gate
                         )
                 
-                # ========== Memory Bank 更新（完全重写）==========
-                # 关键：使用 try-finally 确保同步点一定会到达
-                # 重要：try-finally 必须在 if 外面，确保所有进程都能到达同步点
-                
-                # 🔵 同步点 1：进入更新检查（所有进程必须到达）
+                # ========== Memory Bank 更新 ==========
+                # 使用 memory_update_enabled 而非 memory_bank_updater（后者仅主进程有值）
                 accelerator.wait_for_everyone()
                 
-                # 使用 try-finally 确保所有进程都能到达同步点，即使 memory_bank_updater 为 None
                 try:
-                    if memory_bank_updater is not None and memory_update_tracker is not None:
-                        # 计算是否需要更新（使用 Rank 0 的判断）
+                    if memory_update_enabled:
+                        # 广播是否需要更新
                         if accelerator.is_main_process:
                             should_update_value = 1 if (args.memory_update_frequency > 0 and 
                                                        global_step % args.memory_update_frequency == 0) else 0
@@ -688,69 +687,35 @@ def main():
                         else:
                             should_update_tensor = torch.tensor(0, dtype=torch.long, device=accelerator.device)
                         
-                        # 广播到所有进程
                         if accelerator.num_processes > 1:
                             import torch.distributed as dist
                             dist.broadcast(should_update_tensor, src=0)
                         
                         should_update = bool(should_update_tensor.item())
+                        should_sync_memory_bank = False
+                        should_sync_keys = False
                         
-                        # 🔵 同步点 2：确认所有进程知道是否更新（所有进程必须到达）
-                        accelerator.wait_for_everyone()
-                        
-                        # 只有需要更新时才执行
                         if should_update:
-                            # 初始化 should_sync_keys（所有进程都需要）
-                            should_sync_keys = False
-                            
+                            # 主进程执行更新
                             if accelerator.is_main_process:
-                                Logger(f"[Memory Update] 开始更新记忆库 (step {global_step})", accelerator)
-                                
                                 try:
-                                    # 解码输入文本
-                                    X_cpu = X.cpu()
-                                    input_ids_list = X_cpu.tolist()
-                                    decoded_texts = tokenizer.batch_decode(input_ids_list, skip_special_tokens=True)
+                                    decoded_texts = tokenizer.batch_decode(X.cpu().tolist(), skip_special_tokens=True)
+                                    input_text = next((t for t in decoded_texts if t and t.strip()), None)
                                     
-                                    input_text = None
-                                    for text in decoded_texts:
-                                        if text and text.strip():
-                                            input_text = text
-                                            break
-                                    
-                                    if input_text and input_text.strip():
+                                    if input_text:
                                         with torch.no_grad():
                                             update_result = memory_bank_updater.update_from_text(
-                                                input_text,
-                                                compression_rate=args.memory_compression_rate
+                                                input_text, compression_rate=args.memory_compression_rate
                                             )
                                             
                                             if update_result.get("updated_count", 0) > 0:
                                                 memory_update_tracker.record_update(update_result)
-                                                
-                                                current_ratio = memory_update_tracker.get_update_ratio()
-                                                updated_count = memory_update_tracker.get_updated_count()
-                                                Logger(
-                                                    f"✅ [Memory Update] 记忆库已更新: {update_result['updated_count']} 条事实, "
-                                                    f"当前更新比例: {current_ratio:.6f}",
-                                                    accelerator
-                                                )
-                                                
-                                                # 标记需要同步 memory_bank（在主进程设置标志）
+                                                Logger(f"✅ Memory Bank 已更新: {update_result['updated_count']} 条事实", accelerator)
                                                 should_sync_memory_bank = True
                                                 
-                                                # 检查是否需要重新聚类
-                                                should_recluster = memory_update_tracker.should_recluster()
-                                                
-                                                # 标记是否需要重新聚类（用于后续同步）
-                                                if should_recluster:
-                                                    # 只在主进程执行重新聚类
-                                                    Logger(f"⚠️ [Memory Update] 开始重新聚类 keys...", accelerator)
-                                                    
+                                                if memory_update_tracker.should_recluster():
                                                     from utils.keys_recluster import recluster_keys
-                                                    
-                                                    # unwrapped_model 已经在上面获取了
-                                                    recluster_result = recluster_keys(
+                                                    recluster_keys(
                                                         model=unwrapped_model,
                                                         memory_bank=unwrapped_model.memory_bank,
                                                         valid_mask=unwrapped_model.valid_mask,
@@ -758,133 +723,67 @@ def main():
                                                         device=str(accelerator.device),
                                                         batch_size=MemoryUpdateConf.get("keys_recluster_batch_size", 32),
                                                         sample_ratio=MemoryUpdateConf.get("keys_recluster_sample_ratio", 0.01),
-                                                        accelerator=None  # 传 None 避免 recluster_keys 内部调用同步
+                                                        accelerator=None
                                                     )
-                                                    
-                                                    Logger(f"✅ [Memory Update] Keys 重新聚类完成", accelerator)
                                                     memory_update_tracker.reset()
-                                                    
-                                                    # 标记需要同步 keys（在主进程设置标志）
                                                     should_sync_keys = True
-                                                else:
-                                                    should_sync_keys = False
-                                            else:
-                                                should_sync_keys = False
-                                                should_sync_memory_bank = False
-                                    else:
-                                        should_sync_keys = False
-                                        should_sync_memory_bank = False
+                                                    Logger("✅ Keys 重聚类完成", accelerator)
                                 except Exception as e:
-                                    Logger(f"❌ [Memory Update] 更新失败: {e}", accelerator)
-                                    import traceback
-                                    Logger(f"错误详情:\n{traceback.format_exc()}", accelerator)
-                                    should_sync_keys = False
-                                    should_sync_memory_bank = False
-                            else:
-                                # 非主进程，不执行更新，但需要知道是否需要同步
-                                should_sync_keys = False
-                                should_sync_memory_bank = False
+                                    Logger(f"❌ Memory Update 失败: {e}", accelerator)
                             
-                            # 🔴 关键修复：同步 memory_bank 和 keys 到所有进程（多卡训练必需）
-                            # 所有进程都需要参与同步，所以放在 if should_update 块内但不在 is_main_process 块内
-                            if should_update:
-                                # 广播是否需要同步 memory_bank 的标志
-                                if accelerator.is_main_process:
-                                    sync_memory_bank_flag = torch.tensor(1 if should_sync_memory_bank else 0, dtype=torch.long, device=accelerator.device)
-                                else:
-                                    sync_memory_bank_flag = torch.tensor(0, dtype=torch.long, device=accelerator.device)
+                            # 多卡同步
+                            if accelerator.num_processes > 1:
+                                accelerator.wait_for_everyone()
                                 
-                                if accelerator.num_processes > 1:
-                                    import torch.distributed as dist
-                                    dist.broadcast(sync_memory_bank_flag, src=0)
+                                # 同步 Memory Bank
+                                sync_mb_flag = torch.tensor([1 if should_sync_memory_bank else 0], dtype=torch.int, device=accelerator.device)
+                                if not accelerator.is_main_process:
+                                    sync_mb_flag.zero_()
+                                dist.broadcast(sync_mb_flag, src=0)
                                 
-                                # 先同步 memory_bank（如果需要）
-                                if sync_memory_bank_flag.item() == 1:
+                                if sync_mb_flag.item() == 1:
                                     unwrapped_model = accelerator.unwrap_model(model)
+                                    mb_shape = unwrapped_model.memory_bank.shape
+                                    chunk_size = 5000
+                                    
+                                    for start in range(0, mb_shape[0], chunk_size):
+                                        end = min(start + chunk_size, mb_shape[0])
+                                        if accelerator.is_main_process:
+                                            chunk = unwrapped_model.memory_bank[start:end].clone().to(accelerator.device)
+                                        else:
+                                            chunk = torch.zeros(end - start, mb_shape[1], dtype=torch.int64, device=accelerator.device)
+                                        dist.broadcast(chunk, src=0)
+                                        unwrapped_model.memory_bank[start:end] = chunk.cpu()
                                     
                                     if accelerator.is_main_process:
-                                        Logger("同步 memory_bank 和 valid_mask 到所有进程...", accelerator)
-                                        # 准备广播 memory_bank 和 valid_mask
-                                        memory_bank_cpu = unwrapped_model.memory_bank.cpu()
-                                        valid_mask_cpu = unwrapped_model.valid_mask.cpu()
+                                        vm = unwrapped_model.valid_mask.clone().to(accelerator.device)
                                     else:
-                                        # 非主进程准备接收
-                                        memory_bank_shape = unwrapped_model.memory_bank.shape
-                                        valid_mask_shape = unwrapped_model.valid_mask.shape
-                                        memory_bank_cpu = torch.zeros(memory_bank_shape, dtype=torch.int64)
-                                        valid_mask_cpu = torch.zeros(valid_mask_shape, dtype=torch.bool)
+                                        vm = torch.zeros(mb_shape[0], dtype=torch.bool, device=accelerator.device)
+                                    dist.broadcast(vm, src=0)
+                                    unwrapped_model.valid_mask.copy_(vm.cpu())
                                     
-                                    # 广播 memory_bank 和 valid_mask
-                                    if accelerator.num_processes > 1:
-                                        import torch.distributed as dist
-                                        # 分块广播 memory_bank（避免内存问题）
-                                        chunk_size = 10000  # 每次广播 10000 行
-                                        num_chunks = (memory_bank_cpu.shape[0] + chunk_size - 1) // chunk_size
-                                        
-                                        for chunk_idx in range(num_chunks):
-                                            start_idx = chunk_idx * chunk_size
-                                            end_idx = min(start_idx + chunk_size, memory_bank_cpu.shape[0])
-                                            chunk = memory_bank_cpu[start_idx:end_idx]
-                                            dist.broadcast(chunk, src=0, async_op=False)
-                                        
-                                        # 广播 valid_mask
-                                        dist.broadcast(valid_mask_cpu, src=0, async_op=False)
-                                    
-                                    # 更新所有进程的模型
-                                    unwrapped_model.memory_bank.copy_(memory_bank_cpu)
-                                    unwrapped_model.valid_mask.copy_(valid_mask_cpu)
-                                    
-                                    Logger("Memory Bank 同步完成", accelerator)
+                                    if accelerator.is_main_process:
+                                        Logger("✅ Memory Bank 同步完成", accelerator)
                                 
-                                # 然后同步 keys（如果需要）
-                                # 广播是否需要同步 keys 的标志
-                                if accelerator.is_main_process:
-                                    sync_keys_flag = torch.tensor(1 if should_sync_keys else 0, dtype=torch.long, device=accelerator.device)
-                                else:
-                                    sync_keys_flag = torch.tensor(0, dtype=torch.long, device=accelerator.device)
-                                
-                                if accelerator.num_processes > 1:
-                                    import torch.distributed as dist
-                                    dist.broadcast(sync_keys_flag, src=0)
+                                # 同步 Keys
+                                sync_keys_flag = torch.tensor([1 if should_sync_keys else 0], dtype=torch.int, device=accelerator.device)
+                                if not accelerator.is_main_process:
+                                    sync_keys_flag.zero_()
+                                dist.broadcast(sync_keys_flag, src=0)
                                 
                                 if sync_keys_flag.item() == 1:
-                                    # 所有进程都执行 keys 同步
-                                    unwrapped_model = accelerator.unwrap_model(model)
+                                    gate = accelerator.unwrap_model(model).shared_memory_gate
+                                    if accelerator.is_main_process:
+                                        keys_data = torch.stack([gate.row_keys, gate.col_keys]).to(accelerator.device)
+                                    else:
+                                        keys_data = torch.zeros(2, gate.num_keys, gate.input_dim, dtype=torch.float32, device=accelerator.device)
+                                    dist.broadcast(keys_data, src=0)
+                                    gate.update_keys(keys_data[0], keys_data[1])
                                     
                                     if accelerator.is_main_process:
-                                        Logger("同步 keys 到所有进程...", accelerator)
-                                        # 获取更新后的 keys
-                                        row_keys = unwrapped_model.shared_memory_gate.row_keys
-                                        col_keys = unwrapped_model.shared_memory_gate.col_keys
-                                        
-                                        # 准备广播 tensor
-                                        keys_tensor = torch.stack([row_keys, col_keys])
-                                    else:
-                                        # 非主进程准备接收 tensor
-                                        keys_shape = (2, unwrapped_model.shared_memory_gate.num_keys, unwrapped_model.shared_memory_gate.input_dim)
-                                        keys_tensor = torch.zeros(keys_shape, dtype=torch.float32, device=accelerator.device)
-                                    
-                                    # 广播 keys 到所有进程
-                                    if accelerator.num_processes > 1:
-                                        import torch.distributed as dist
-                                        dist.broadcast(keys_tensor, src=0)
-                                    
-                                    # 更新所有进程的模型
-                                    new_row_keys = keys_tensor[0]
-                                    new_col_keys = keys_tensor[1]
-                                    unwrapped_model.shared_memory_gate.update_keys(new_row_keys, new_col_keys)
-                                    
-                                    Logger("Keys 同步完成", accelerator)
+                                        Logger("✅ Keys 同步完成", accelerator)
                 finally:
-                    # 🔵 同步点 3：更新完成（所有进程必须到达，使用 finally 确保）
-                    # 关键：所有进程都会执行这个 finally 块，无论 memory_bank_updater 是否为 None
-                    # 这样确保所有进程都能到达同步点
                     accelerator.wait_for_everyone()
-                    if accelerator.is_main_process:
-                        Logger(f"[Memory Update] 所有进程已同步", accelerator)
-                
-                # 🔵 同步点 4：整个更新流程结束（所有进程必须到达）
-                accelerator.wait_for_everyone()
                 
                 update_time = time.time() - update_start_time
 
