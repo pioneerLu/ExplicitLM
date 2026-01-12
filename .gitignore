@@ -1,5 +1,6 @@
 # Documentation (managed separately)
 *.md
+!README.md
 
 # Training outputs
 out/
