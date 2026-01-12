@@ -1,3 +1,6 @@
+# Documentation (managed separately)
+*.md
+
 # Training outputs
 out/
 outputs/
