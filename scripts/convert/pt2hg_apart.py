@@ -1937,11 +1937,11 @@ def main():
             )
         except TypeError:
             # 如果 tokenizer 不支持 enable_thinking 参数，回退到默认行为
-            formatted_prompt = tokenizer.apply_chat_template(
-                messages, 
-                tokenize=False, 
-                add_generation_prompt=True
-            )
+        formatted_prompt = tokenizer.apply_chat_template(
+            messages, 
+            tokenize=False, 
+            add_generation_prompt=True
+        )
     else:
         formatted_prompt = prompt
     

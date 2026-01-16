@@ -493,36 +493,36 @@ def train_epoch_sft(
     if memory_update_enabled and (memory_bank_updater is None or memory_update_tracker is None):
         from utils.memory_bank_updater import MemoryBankUpdater
         from utils.fact_extractor import FactExtractor
-        from config.memory_update import MemoryUpdateConf
+            from config.memory_update import MemoryUpdateConf
         
         # 只在主进程初始化
         if accelerator.is_main_process:
             def get_cfg_value(key, default):
-                if isinstance(memory_update_cfg, dict):
+                    if isinstance(memory_update_cfg, dict):
                     return memory_update_cfg.get(key, MemoryUpdateConf.get(key, default))
-                elif hasattr(memory_update_cfg, 'get'):
+                    elif hasattr(memory_update_cfg, 'get'):
                     return memory_update_cfg.get(key, MemoryUpdateConf.get(key, default))
                 else:
                     return getattr(memory_update_cfg, key, MemoryUpdateConf.get(key, default))
             
-            if memory_bank_updater is None:
-                fact_extractor = FactExtractor(
+                if memory_bank_updater is None:
+            fact_extractor = FactExtractor(
                     model_path=get_cfg_value("llmlingua_model_path", "llmlingua-2-bert"),
                     compression_rate=get_cfg_value("memory_compression_rate", 0.4)
-                )
-                memory_bank_updater = MemoryBankUpdater(
-                    model=unwrapped_model,
-                    tokenizer=tokenizer,
-                    fact_extractor=fact_extractor,
+            )
+            memory_bank_updater = MemoryBankUpdater(
+                model=unwrapped_model,
+                tokenizer=tokenizer,
+                fact_extractor=fact_extractor,
                     update_strategy=get_cfg_value("memory_update_strategy", "lru")
-                )
+            )
             
-            if memory_update_tracker is None:
-                total_valid_entries = unwrapped_model.valid_mask.sum().item() if hasattr(unwrapped_model, 'valid_mask') else unwrapped_model.memory_bank.shape[0]
-                memory_update_tracker = MemoryUpdateTracker(
-                    total_valid_entries=total_valid_entries,
+                if memory_update_tracker is None:
+            total_valid_entries = unwrapped_model.valid_mask.sum().item() if hasattr(unwrapped_model, 'valid_mask') else unwrapped_model.memory_bank.shape[0]
+            memory_update_tracker = MemoryUpdateTracker(
+                total_valid_entries=total_valid_entries,
                     update_ratio_threshold=get_cfg_value("keys_recluster_update_ratio_threshold", 0.1)
-                )
+            )
             
             Logger(f"Memory Update 初始化完成", accelerator)
         
@@ -625,7 +625,7 @@ def train_epoch_sft(
                         return memory_update_cfg.get(key, MemoryUpdateConf.get(key, default))
                     elif hasattr(memory_update_cfg, 'get'):
                         return memory_update_cfg.get(key, MemoryUpdateConf.get(key, default))
-                    else:
+                else:
                         return getattr(memory_update_cfg, key, MemoryUpdateConf.get(key, default))
                 return MemoryUpdateConf.get(key, default)
             
@@ -652,44 +652,44 @@ def train_epoch_sft(
                 if should_update:
                     # 主进程执行更新
                     if accelerator.is_main_process and memory_bank_updater is not None:
-                        try:
-                            if prompt_texts is not None and len(prompt_texts) > 0:
-                                input_text = prompt_texts[0]
-                            else:
+                try:
+                    if prompt_texts is not None and len(prompt_texts) > 0:
+                        input_text = prompt_texts[0]
+                    else:
                                 decoded_texts = tokenizer.batch_decode(X.cpu().tolist(), skip_special_tokens=True)
                                 input_text = next((t for t in decoded_texts if t and t.strip()), None)
-                            
+                    
                             if input_text and input_text.strip():
-                                with torch.no_grad():
-                                    update_result = memory_bank_updater.update_from_text(
+                    with torch.no_grad():
+                        update_result = memory_bank_updater.update_from_text(
                                         input_text, compression_rate=get_cfg_value("memory_compression_rate", 0.4)
-                                    )
-                                    
-                                    if update_result.get("updated_count", 0) > 0:
-                                        memory_update_tracker.record_update(update_result)
+                        )
+                        
+                        if update_result.get("updated_count", 0) > 0:
+                            memory_update_tracker.record_update(update_result)
                                         Logger(f"✅ Memory Bank 已更新: {update_result['updated_count']} 条事实", accelerator)
                                         should_sync_memory_bank = True
                                         
                                         if memory_update_tracker.should_recluster():
-                                            from utils.keys_recluster import recluster_keys
+                                from utils.keys_recluster import recluster_keys
                                             recluster_keys(
-                                                model=unwrapped_model,
-                                                memory_bank=unwrapped_model.memory_bank,
-                                                valid_mask=unwrapped_model.valid_mask,
-                                                num_keys=unwrapped_model.shared_memory_gate.num_keys,
-                                                device=str(accelerator.device),
+                                    model=unwrapped_model,
+                                    memory_bank=unwrapped_model.memory_bank,
+                                    valid_mask=unwrapped_model.valid_mask,
+                                    num_keys=unwrapped_model.shared_memory_gate.num_keys,
+                                    device=str(accelerator.device),
                                                 batch_size=get_cfg_value("keys_recluster_batch_size", 32),
                                                 sample_ratio=get_cfg_value("keys_recluster_sample_ratio", 0.01),
                                                 accelerator=None
-                                            )
-                                            memory_update_tracker.reset()
+                                )
+                                memory_update_tracker.reset()
                                             should_sync_keys = True
                                             Logger("✅ Keys 重聚类完成", accelerator)
                         except Exception as e:
                             Logger(f"❌ Memory Update 失败: {e}", accelerator)
-                    
+                                
                     # 多卡同步
-                    if accelerator.num_processes > 1:
+                                if accelerator.num_processes > 1:
                         accelerator.wait_for_everyone()
                         
                         # 同步 Memory Bank
@@ -720,7 +720,7 @@ def train_epoch_sft(
                             
                             if accelerator.is_main_process:
                                 Logger("✅ Memory Bank 同步完成", accelerator)
-                        
+                                    
                         # 同步 Keys
                         sync_keys_flag = torch.tensor([1 if should_sync_keys else 0], dtype=torch.int, device=accelerator.device)
                         if not accelerator.is_main_process:

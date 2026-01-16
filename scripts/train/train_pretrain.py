@@ -693,8 +693,8 @@ def main():
                         
                         should_update = bool(should_update_tensor.item())
                         should_sync_memory_bank = False
-                        should_sync_keys = False
-                        
+                            should_sync_keys = False
+                            
                         if should_update:
                             # 主进程执行更新
                             if accelerator.is_main_process:
@@ -732,7 +732,7 @@ def main():
                                     Logger(f"❌ Memory Update 失败: {e}", accelerator)
                             
                             # 多卡同步
-                            if accelerator.num_processes > 1:
+                                if accelerator.num_processes > 1:
                                 accelerator.wait_for_everyone()
                                 
                                 # 同步 Memory Bank
@@ -748,16 +748,16 @@ def main():
                                     
                                     for start in range(0, mb_shape[0], chunk_size):
                                         end = min(start + chunk_size, mb_shape[0])
-                                        if accelerator.is_main_process:
+                                    if accelerator.is_main_process:
                                             chunk = unwrapped_model.memory_bank[start:end].clone().to(accelerator.device)
-                                        else:
+                                    else:
                                             chunk = torch.zeros(end - start, mb_shape[1], dtype=torch.int64, device=accelerator.device)
                                         dist.broadcast(chunk, src=0)
                                         unwrapped_model.memory_bank[start:end] = chunk.cpu()
                                     
-                                    if accelerator.is_main_process:
+                                if accelerator.is_main_process:
                                         vm = unwrapped_model.valid_mask.clone().to(accelerator.device)
-                                    else:
+                                else:
                                         vm = torch.zeros(mb_shape[0], dtype=torch.bool, device=accelerator.device)
                                     dist.broadcast(vm, src=0)
                                     unwrapped_model.valid_mask.copy_(vm.cpu())
@@ -769,7 +769,7 @@ def main():
                                 sync_keys_flag = torch.tensor([1 if should_sync_keys else 0], dtype=torch.int, device=accelerator.device)
                                 if not accelerator.is_main_process:
                                     sync_keys_flag.zero_()
-                                dist.broadcast(sync_keys_flag, src=0)
+                                    dist.broadcast(sync_keys_flag, src=0)
                                 
                                 if sync_keys_flag.item() == 1:
                                     gate = accelerator.unwrap_model(model).shared_memory_gate
@@ -783,7 +783,7 @@ def main():
                                     if accelerator.is_main_process:
                                         Logger("✅ Keys 同步完成", accelerator)
                 finally:
-                    accelerator.wait_for_everyone()
+                accelerator.wait_for_everyone()
                 
                 update_time = time.time() - update_start_time
 
