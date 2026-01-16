@@ -521,7 +521,7 @@ def train_epoch_sft(
             total_valid_entries = unwrapped_model.valid_mask.sum().item() if hasattr(unwrapped_model, 'valid_mask') else unwrapped_model.memory_bank.shape[0]
             memory_update_tracker = MemoryUpdateTracker(
                 total_valid_entries=total_valid_entries,
-                    update_ratio_threshold=get_cfg_value("keys_recluster_update_ratio_threshold", 0.1)
+                update_ratio_threshold=1.0  # 不再用于 keys 重新聚类，设为 1.0 禁用
             )
             
             Logger(f"Memory Update 初始化完成", accelerator)
@@ -647,7 +647,6 @@ def train_epoch_sft(
                 
                 should_update = bool(should_update_tensor.item())
                 should_sync_memory_bank = False
-                should_sync_keys = False
                 
                 if should_update:
                     # 主进程执行更新
@@ -667,24 +666,8 @@ def train_epoch_sft(
                         
                         if update_result.get("updated_count", 0) > 0:
                             memory_update_tracker.record_update(update_result)
-                                        Logger(f"✅ Memory Bank 已更新: {update_result['updated_count']} 条事实", accelerator)
-                                        should_sync_memory_bank = True
-                                        
-                                        if memory_update_tracker.should_recluster():
-                                from utils.keys_recluster import recluster_keys
-                                            recluster_keys(
-                                    model=unwrapped_model,
-                                    memory_bank=unwrapped_model.memory_bank,
-                                    valid_mask=unwrapped_model.valid_mask,
-                                    num_keys=unwrapped_model.shared_memory_gate.num_keys,
-                                    device=str(accelerator.device),
-                                                batch_size=get_cfg_value("keys_recluster_batch_size", 32),
-                                                sample_ratio=get_cfg_value("keys_recluster_sample_ratio", 0.01),
-                                                accelerator=None
-                                )
-                                memory_update_tracker.reset()
-                                            should_sync_keys = True
-                                            Logger("✅ Keys 重聚类完成", accelerator)
+                            Logger(f"✅ Memory Bank 已更新: {update_result['updated_count']} 条事实", accelerator)
+                            should_sync_memory_bank = True
                         except Exception as e:
                             Logger(f"❌ Memory Update 失败: {e}", accelerator)
                                 
@@ -720,24 +703,6 @@ def train_epoch_sft(
                             
                             if accelerator.is_main_process:
                                 Logger("✅ Memory Bank 同步完成", accelerator)
-                                    
-                        # 同步 Keys
-                        sync_keys_flag = torch.tensor([1 if should_sync_keys else 0], dtype=torch.int, device=accelerator.device)
-                        if not accelerator.is_main_process:
-                            sync_keys_flag.zero_()
-                        dist.broadcast(sync_keys_flag, src=0)
-                        
-                        if sync_keys_flag.item() == 1:
-                            gate = unwrapped_model.shared_memory_gate
-                            if accelerator.is_main_process:
-                                keys_data = torch.stack([gate.row_keys, gate.col_keys]).to(accelerator.device)
-                            else:
-                                keys_data = torch.zeros(2, gate.num_keys, gate.input_dim, dtype=torch.float32, device=accelerator.device)
-                            dist.broadcast(keys_data, src=0)
-                            gate.update_keys(keys_data[0], keys_data[1])
-                            
-                            if accelerator.is_main_process:
-                                Logger("✅ Keys 同步完成", accelerator)
             finally:
                 accelerator.wait_for_everyone()
 

@@ -150,7 +150,7 @@ nohup $ACCELERATE_CMD scripts/train/train_sft.py \
     model.qwen3_model_path="$QWEN3_MODEL_PATH" \
     model.cache_path="$CACHE_PATH" \
     model.recompute_cache=False \
-    model.knowledge_num=1048576 \
+    model.knowledge_num=10000 \
     model.knowledge_length=32 \
     model.max_seq_len="$MAX_SEQ_LEN" \
     model.num_candidates=16 \

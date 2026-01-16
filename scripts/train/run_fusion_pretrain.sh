@@ -2,7 +2,7 @@
 
 # ========== 配置区域 ==========
 # 设置GPU可见设备（平衡显存）
-export CUDA_VISIBLE_DEVICES=3,5,7
+export CUDA_VISIBLE_DEVICES=0,1,2
 
 # 设置PyTorch内存分配配置（保持即可）
 export PYTORCH_ALLOC_CONF=expandable_segments:True
@@ -67,7 +67,7 @@ PRETRAIN_DATASET_PATH="data/parquet_data/sample_256"
 VAL_SPLIT_RATIO=0.05  
 
 # 模型配置（参考 run_sft.sh）
-KNOWLEDGE_NUM=1048576  # 记忆库条目数
+KNOWLEDGE_NUM=10000  # 记忆库条目数
 KNOWLEDGE_LENGTH=32   # 每个记忆条目的 token 数
 NUM_CANDIDATES=16      # 候选记忆数
 NUM_SELECTED=1         # 选中的记忆数

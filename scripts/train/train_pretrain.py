@@ -237,7 +237,7 @@ def main():
     # 模型配置
     parser.add_argument("--qwen3_model_path", type=str, required=True, help="Qwen3 模型路径")
     parser.add_argument("--pretrained_memory_gate_path", type=str, default="", help="预训练 MemoryGate 权重路径（可选，如果为空则跳过加载）")
-    parser.add_argument("--knowledge_num", type=int, default=1024*1024, help="记忆库条目数")
+    parser.add_argument("--knowledge_num", type=int, default=100*100, help="记忆库条目数")
     parser.add_argument("--knowledge_length", type=int, default=16, help="每个记忆条目的 token 数")
     # 注意：--knowledge_dim 已移除，实际使用 Qwen3 的 hidden_size (2560)
     parser.add_argument("--num_candidates", type=int, default=8, help="候选记忆数")
@@ -466,12 +466,11 @@ def main():
                 update_strategy=args.memory_update_strategy
             )
             
-            # 初始化更新追踪器（使用配置文件中的阈值）
+            # 初始化更新追踪器（用于统计更新情况）
             total_valid_entries = unwrapped_model.valid_mask.sum().item() if hasattr(unwrapped_model, 'valid_mask') else unwrapped_model.memory_bank.shape[0]
-            update_ratio_threshold = MemoryUpdateConf.get("keys_recluster_update_ratio_threshold", 0.1)
             memory_update_tracker = MemoryUpdateTracker(
                 total_valid_entries=total_valid_entries,
-                update_ratio_threshold=update_ratio_threshold
+                update_ratio_threshold=1.0  # 不再用于 keys 重新聚类，设为 1.0 禁用
             )
             
             Logger(f"Memory Bank 更新组件初始化完成: 更新频率={args.memory_update_frequency}, 策略={args.memory_update_strategy} (默认值来自 config/memory_update.py)", accelerator)
@@ -693,7 +692,6 @@ def main():
                         
                         should_update = bool(should_update_tensor.item())
                         should_sync_memory_bank = False
-                            should_sync_keys = False
                             
                         if should_update:
                             # 主进程执行更新
@@ -712,27 +710,11 @@ def main():
                                                 memory_update_tracker.record_update(update_result)
                                                 Logger(f"✅ Memory Bank 已更新: {update_result['updated_count']} 条事实", accelerator)
                                                 should_sync_memory_bank = True
-                                                
-                                                if memory_update_tracker.should_recluster():
-                                                    from utils.keys_recluster import recluster_keys
-                                                    recluster_keys(
-                                                        model=unwrapped_model,
-                                                        memory_bank=unwrapped_model.memory_bank,
-                                                        valid_mask=unwrapped_model.valid_mask,
-                                                        num_keys=unwrapped_model.shared_memory_gate.num_keys,
-                                                        device=str(accelerator.device),
-                                                        batch_size=MemoryUpdateConf.get("keys_recluster_batch_size", 32),
-                                                        sample_ratio=MemoryUpdateConf.get("keys_recluster_sample_ratio", 0.01),
-                                                        accelerator=None
-                                                    )
-                                                    memory_update_tracker.reset()
-                                                    should_sync_keys = True
-                                                    Logger("✅ Keys 重聚类完成", accelerator)
                                 except Exception as e:
                                     Logger(f"❌ Memory Update 失败: {e}", accelerator)
                             
                             # 多卡同步
-                                if accelerator.num_processes > 1:
+                            if accelerator.num_processes > 1:
                                 accelerator.wait_for_everyone()
                                 
                                 # 同步 Memory Bank
@@ -748,42 +730,24 @@ def main():
                                     
                                     for start in range(0, mb_shape[0], chunk_size):
                                         end = min(start + chunk_size, mb_shape[0])
-                                    if accelerator.is_main_process:
+                                        if accelerator.is_main_process:
                                             chunk = unwrapped_model.memory_bank[start:end].clone().to(accelerator.device)
-                                    else:
+                                        else:
                                             chunk = torch.zeros(end - start, mb_shape[1], dtype=torch.int64, device=accelerator.device)
                                         dist.broadcast(chunk, src=0)
                                         unwrapped_model.memory_bank[start:end] = chunk.cpu()
                                     
-                                if accelerator.is_main_process:
+                                    if accelerator.is_main_process:
                                         vm = unwrapped_model.valid_mask.clone().to(accelerator.device)
-                                else:
+                                    else:
                                         vm = torch.zeros(mb_shape[0], dtype=torch.bool, device=accelerator.device)
                                     dist.broadcast(vm, src=0)
                                     unwrapped_model.valid_mask.copy_(vm.cpu())
                                     
                                     if accelerator.is_main_process:
                                         Logger("✅ Memory Bank 同步完成", accelerator)
-                                
-                                # 同步 Keys
-                                sync_keys_flag = torch.tensor([1 if should_sync_keys else 0], dtype=torch.int, device=accelerator.device)
-                                if not accelerator.is_main_process:
-                                    sync_keys_flag.zero_()
-                                    dist.broadcast(sync_keys_flag, src=0)
-                                
-                                if sync_keys_flag.item() == 1:
-                                    gate = accelerator.unwrap_model(model).shared_memory_gate
-                                    if accelerator.is_main_process:
-                                        keys_data = torch.stack([gate.row_keys, gate.col_keys]).to(accelerator.device)
-                                    else:
-                                        keys_data = torch.zeros(2, gate.num_keys, gate.input_dim, dtype=torch.float32, device=accelerator.device)
-                                    dist.broadcast(keys_data, src=0)
-                                    gate.update_keys(keys_data[0], keys_data[1])
-                                    
-                                    if accelerator.is_main_process:
-                                        Logger("✅ Keys 同步完成", accelerator)
                 finally:
-                accelerator.wait_for_everyone()
+                    accelerator.wait_for_everyone()
                 
                 update_time = time.time() - update_start_time
 

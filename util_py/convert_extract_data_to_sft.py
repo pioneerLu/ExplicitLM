@@ -132,7 +132,7 @@ def tokenize_extract_support(
 def process_data(
     input_path: str,
     tokenizer: AutoTokenizer,
-    knowledge_num: int = 1048576,
+    knowledge_num: int = 10000,
     knowledge_length: int = 32,
     train_ratio: float = 0.8
 ) -> Tuple[List[Dict], List[Dict], torch.Tensor, torch.Tensor, List[Dict]]:

@@ -63,7 +63,7 @@ class ExplicitLMConfig(PretrainedConfig):
         rope_theta=10000.0,
         attention_bias=False,
         attention_dropout=0.0,
-        knowledge_num=1048576,
+        knowledge_num=10000,
         knowledge_length=32,
         num_candidates=16,
         num_selected=1,

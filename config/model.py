@@ -13,9 +13,7 @@ ModelConf = {
     # Memory / Knowledge 配置
     "use_token_memory": True,
     "knowledge_length": 32,  # 每个记忆条目的 token 数
-    "knowledge_num": 1024*1024,  # 1048576 个记忆条目
-    "keys_path": "data/keys.pt",  # Product Key Memory 的 keys 路径
-    "trainable_keys": True,  # 是否允许 keys 在训练时更新
+    "knowledge_num": 100*100,  # 10000 个记忆条目
     "cache_path": "data/cache/knowledge_cache.pt",  # 记忆库路径（支持 .pt 文件直接加载或 .json 文件处理后保存）
     "recompute_cache": False,  # 是否重新计算缓存（仅对 .json 文件有效）
     "disable_db": False,  # 是否禁用数据库功能

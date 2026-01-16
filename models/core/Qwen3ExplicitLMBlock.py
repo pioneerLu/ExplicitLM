@@ -473,8 +473,10 @@ class Qwen3ExplicitLMBlock(nn.Module):
         # 3. 记忆检索模式
         h_for_memory = self.memory_norm(hidden_states)
         
-        # 4. 获取候选
-        candidate_indices, candidate_scores = self.memory_gate(h_for_memory)
+        # 4. 获取候选（直接 RAG 相似度查找）
+        candidate_indices, candidate_scores = self.memory_gate(
+            h_for_memory, memory_bank, tok_embeddings, valid_mask
+        )
         
         # 5. 选择记忆
         selection_result = self._select_memory(

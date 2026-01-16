@@ -43,7 +43,7 @@ except ImportError:
 # 配置
 # ============================================================================
 DEFAULT_CONFIG = {
-    "knowledge_num": 1024 * 1024,  # 1,048,576
+    "knowledge_num": 100 * 100,  # 10,000
     "knowledge_length": 32,
     "compression_rate": 0.4,
     "num_workers": 4,

@@ -63,14 +63,13 @@ class ExplicitLMConfig(PretrainedConfig):
         rope_theta=10000.0,
         attention_bias=False,
         attention_dropout=0.0,
-        knowledge_num=1048576,
+        knowledge_num=10000,
         knowledge_length=32,
         num_candidates=16,
         num_selected=1,
         gumbel_temperature=1.0,
         use_memory_gate=True,
         memory_bank_path: Optional[str] = None,  # Memory Bank文件路径（相对或绝对路径）
-        keys_path: Optional[str] = None,  # Keys文件路径（相对或绝对路径）
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -92,7 +91,6 @@ class ExplicitLMConfig(PretrainedConfig):
         self.gumbel_temperature = gumbel_temperature
         self.use_memory_gate = use_memory_gate
         self.memory_bank_path = memory_bank_path  # Memory Bank独立存储路径
-        self.keys_path = keys_path  # Keys文件路径
 
 
 class ExplicitLMForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
@@ -407,18 +405,9 @@ class ExplicitLMForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
             
             # 确定文件路径
             memory_bank_path = resolve_path("memory_bank.pt", "memory_bank_path") or "memory_bank.pt"
-            keys_path = resolve_path("keys.pt", "keys_path")
             
-            # 如果 keys 不存在，尝试自动生成
-            if not keys_path or not os.path.exists(keys_path):
-                mb_file_path = resolve_path("memory_bank.pt") or (memory_bank_path if os.path.exists(memory_bank_path) else None)
-                if mb_file_path and os.path.exists(mb_file_path):
-                    knowledge_num = getattr(model.config, 'knowledge_num', 1048576)
-                    keys_path = _auto_generate_keys(model, mb_file_path, model_dir, knowledge_num) or keys_path
-            
-            # 加载 Memory Bank 和 Keys
+            # 加载 Memory Bank
             model.load_memory_bank(memory_bank_path)
-            _load_keys(model, keys_path)
             
             # 如果使用了 device_map，将 memory_bank 和 valid_mask 移到正确的设备
             if device_map is not None and hasattr(model.model, 'memory_bank') and hasattr(model.model, 'valid_mask'):
@@ -477,7 +466,7 @@ def map_explicitlm_weight_name(explicitlm_name: str) -> str:
         return 'model.' + explicitlm_name
 
 
-def create_explicitlm_config(qwen3_path: str, memory_config: Optional[Dict[str, Any]] = None, memory_bank_path: Optional[str] = None, keys_path: Optional[str] = None) -> ExplicitLMConfig:
+def create_explicitlm_config(qwen3_path: str, memory_config: Optional[Dict[str, Any]] = None, memory_bank_path: Optional[str] = None) -> ExplicitLMConfig:
     """基于Qwen3配置创建ExplicitLM配置"""
     try:
         qwen3_config = Qwen3Config.from_pretrained(qwen3_path)
@@ -511,14 +500,13 @@ def create_explicitlm_config(qwen3_path: str, memory_config: Optional[Dict[str, 
         rope_theta=getattr(qwen3_config, 'rope_theta', 10000.0),
         attention_bias=getattr(qwen3_config, 'attention_bias', False),
         attention_dropout=getattr(qwen3_config, 'attention_dropout', 0.0),
-        knowledge_num=memory_config.get('knowledge_num', 1048576) if memory_config else 1048576,
+        knowledge_num=memory_config.get('knowledge_num', 10000) if memory_config else 10000,
         knowledge_length=memory_config.get('knowledge_length', 32) if memory_config else 32,
         num_candidates=memory_config.get('num_candidates', 16) if memory_config else 16,
         num_selected=memory_config.get('num_selected', 1) if memory_config else 1,
         gumbel_temperature=memory_config.get('gumbel_temperature', 1.0) if memory_config else 1.0,
         use_memory_gate=memory_config.get('use_memory_gate', True) if memory_config else True,
         memory_bank_path=memory_bank_path,  # Memory Bank路径
-        keys_path=keys_path,  # Keys 路径
     )
 
 
@@ -634,91 +622,6 @@ def _apply_device_map(model, device_map, torch_dtype=None):
     return model
 
 
-def _auto_generate_keys(model, mb_file_path, model_dir, knowledge_num):
-    """自动生成 Keys 文件"""
-    from util_py.generate_keys_from_memory_bank import generate_keys_from_token_ids, load_memory_bank_batch
-    
-    print(f"⚠️  Keys 文件不存在，基于 Memory Bank 自动生成: {mb_file_path}")
-    output_keys_path = str(model_dir / "keys.pt") if model_dir.exists() else "keys.pt"
-    
-    try:
-        mb_tensor, mb_valid_mask, mb_metadata = load_memory_bank_batch(mb_file_path)
-        dataset_name = _extract_dataset_name(mb_file_path, mb_metadata)
-        
-        # 获取 embedding 层
-        embedding_layer = None
-        try:
-            if hasattr(model, 'get_input_embeddings'):
-                embedding_layer = model.get_input_embeddings()
-            elif hasattr(model.model, 'embed_tokens'):
-                embedding_layer = model.model.embed_tokens
-        except:
-            pass
-        
-        # 获取 Qwen3 路径
-        qwen3_path = None
-        checkpoint_info_path = model_dir / "checkpoint_info.json"
-        if checkpoint_info_path.exists():
-            try:
-                import json
-                with open(checkpoint_info_path, 'r') as f:
-                    qwen3_path = json.load(f).get("qwen3_path")
-            except:
-                pass
-        
-        if embedding_layer or (qwen3_path and os.path.exists(qwen3_path)):
-            generate_keys_from_token_ids(
-                memory_bank=mb_tensor,
-                valid_mask=mb_valid_mask,
-                embedding_layer=embedding_layer,
-                qwen_model_path=qwen3_path if embedding_layer is None else None,
-                output_keys_path=output_keys_path,
-                device="cuda" if torch.cuda.is_available() else "cpu",
-                batch_size=32,
-                knowledge_num=knowledge_num,
-                memory_bank_path=mb_file_path,
-                dataset_name=dataset_name,
-            )
-            print(f"✅ Keys 已自动生成: {output_keys_path}")
-            return output_keys_path
-        else:
-            print(f"⚠️  无法获取 embedding 层或 Qwen3 路径，无法自动生成 Keys")
-    except Exception as e:
-        print(f"⚠️  自动生成 Keys 失败: {e}")
-        import traceback
-        print(traceback.format_exc())
-    
-    return None
-
-
-def _load_keys(model, keys_path):
-    """加载 Keys 文件"""
-    if not hasattr(model.model, 'shared_memory_gate') or model.model.shared_memory_gate is None:
-        return
-    
-    if not keys_path or not os.path.exists(keys_path):
-        print(f"⚠️  Keys 文件不存在，将使用随机初始化的 keys")
-        return
-    
-    try:
-        keys_data = torch.load(keys_path, map_location='cpu')
-        if isinstance(keys_data, dict):
-            row_keys = keys_data.get("row_keys")
-            col_keys = keys_data.get("col_keys")
-            if row_keys is not None and col_keys is not None:
-                model.model.shared_memory_gate.update_keys(row_keys, col_keys)
-                print(f"✅ Keys 已加载: {keys_path}")
-                if keys_metadata := keys_data.get("metadata", {}):
-                    print(f"⚠️  提醒: 请确认 Keys 与 Memory Bank 匹配")
-                    print(f"   Keys 来源: dataset={keys_metadata.get('dataset_name', 'unknown')}, mb_path={keys_metadata.get('memory_bank_path', 'unknown')}")
-            else:
-                print(f"⚠️  Keys 文件格式不正确，将使用随机初始化的 keys")
-        else:
-            print(f"⚠️  Keys 文件格式不正确，将使用随机初始化的 keys")
-    except Exception as e:
-        print(f"⚠️  加载 Keys 失败: {e}，将使用随机初始化的 keys")
-
-
 def load_checkpoint(checkpoint_path: str) -> Dict[str, Any]:
     """加载checkpoint文件，支持多种格式"""
     if not os.path.exists(checkpoint_path):
@@ -765,9 +668,8 @@ def convert_to_hf_format(
     checkpoint_path: str,
     qwen3_path: str,
     output_path: str,
-    keys_path: Optional[str] = None,
     memory_bank_path: Optional[str] = None,
-    knowledge_num: int = 1048576,
+    knowledge_num: int = 10000,
     knowledge_length: int = 32,
     num_candidates: int = 16,
     num_selected: int = 1,
@@ -793,13 +695,12 @@ def convert_to_hf_format(
         "use_memory_gate": True,
     }
     
-    # 设置memory_bank_path和keys_path
+    # 设置memory_bank_path
     # 注意：无论是否提供memory_bank_path，最终都会保存到模型目录下的memory_bank.pt
     # 所以config中统一使用相对路径"memory_bank.pt"
     config_memory_bank_path = "memory_bank.pt"
-    config_keys_path = "keys.pt"  # 默认 keys 路径
     
-    config = create_explicitlm_config(qwen3_path, memory_config, config_memory_bank_path, config_keys_path)
+    config = create_explicitlm_config(qwen3_path, memory_config, config_memory_bank_path)
     
     # 2.1. 添加 auto_map 属性
     config.auto_map = {
@@ -926,58 +827,6 @@ def convert_to_hf_format(
                 memory_bank_saved = True
         except Exception as e:
             print(f"⚠️ 加载Memory Bank失败: {e}")
-    
-    # 7.5. 处理 Keys 文件
-    keys_saved = False
-    output_keys_path = os.path.join(output_path, "keys.pt")
-    
-    if keys_path and os.path.exists(keys_path):
-        # 如果用户指定了 keys_path 且文件存在，直接复制
-        print(f"\n📥 步骤7.5: 使用指定的 Keys 文件...")
-        try:
-            import shutil
-            shutil.copy2(keys_path, output_keys_path)
-            print(f"✅ Keys 文件已复制: {keys_path} -> {output_keys_path}")
-            print(f"⚠️  提醒: 请确认该 Keys 文件与当前 Memory Bank 匹配，否则检索效果可能异常")
-            keys_saved = True
-        except Exception as e:
-            print(f"⚠️ 复制 Keys 文件失败: {e}")
-    elif memory_bank_saved and memory_bank_path:
-        # 如果 Memory Bank 已保存但 keys 不存在，自动生成
-        print(f"\n📥 步骤7.5: 自动生成 Keys 文件...")
-        print(f"   未找到 Keys 文件，将基于 Memory Bank 自动生成")
-        try:
-            from util_py.generate_keys_from_memory_bank import generate_keys_from_token_ids
-            
-            # 重新加载 Memory Bank（用于生成 keys）
-            mb_tensor, mb_valid_mask, mb_metadata = _load_memory_bank_file(memory_bank_path)
-            
-            if mb_valid_mask is None:
-                pad_token_id = getattr(config, 'pad_token_id', 0) or 0
-                is_all_pad = (mb_tensor == pad_token_id).all(dim=-1)
-                mb_valid_mask = ~is_all_pad
-            
-            dataset_name = _extract_dataset_name(memory_bank_path, mb_metadata)
-            
-            print(f"   正在生成 Keys（这可能需要一些时间）...")
-            generate_keys_from_token_ids(
-                mb_tensor,
-                mb_valid_mask,
-                qwen3_path,
-                output_keys_path,
-                device="cuda" if torch.cuda.is_available() else "cpu",
-                batch_size=32,
-                knowledge_num=knowledge_num,
-                memory_bank_path=memory_bank_path,
-                dataset_name=dataset_name,
-            )
-            print(f"✅ Keys 文件已自动生成: {output_keys_path}")
-            keys_saved = True
-        except Exception as e:
-            print(f"⚠️ 自动生成 Keys 失败: {e}")
-            import traceback
-            print(traceback.format_exc())
-            print(f"   提示: 可以稍后手动运行 generate_keys_from_memory_bank.py 生成 Keys")
     
     # 8. 保存为HuggingFace格式
     print(f"\n💾 步骤8: 保存为HuggingFace格式: {output_path}")
@@ -1273,10 +1122,6 @@ from typing import Optional
 {inspect.getsource(_extract_dataset_name)}
 
 {inspect.getsource(_apply_device_map)}
-
-{inspect.getsource(_auto_generate_keys)}
-
-{inspect.getsource(_load_keys)}
 '''
         print(f"   ✅ 已获取辅助函数源代码（通过inspect.getsource）")
     except Exception as e:
@@ -2014,8 +1859,6 @@ def main():
                        help=f"Qwen3基础模型路径（默认: {DEFAULT_QWEN3_PATH}）")
     parser.add_argument("--output_path", "-o", type=str, default=None,
                        help="输出HF模型路径（默认: 根据checkpoint名自动生成）")
-    parser.add_argument("--keys_path", type=str, default=None,
-                       help="Keys文件路径（可选，默认自动生成）")
     parser.add_argument("--memory_bank_path", "-m", type=str, default=None,
                        help="Memory Bank文件路径（可选，会单独保存）")
     parser.add_argument("--knowledge_num", type=int, default=1048576,
@@ -2077,7 +1920,6 @@ def main():
             checkpoint_path=args.checkpoint_path,
             qwen3_path=args.qwen3_path,
             output_path=args.output_path,
-            keys_path=args.keys_path,
             memory_bank_path=args.memory_bank_path,
             knowledge_num=args.knowledge_num,
             knowledge_length=args.knowledge_length,

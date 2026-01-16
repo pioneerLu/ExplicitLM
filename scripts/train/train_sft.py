@@ -367,12 +367,11 @@ def main(cfg):
                 update_strategy=get_cfg_value("memory_update_strategy", MemoryUpdateConf.get("memory_update_strategy", "lru"))
             )
             
-            # 初始化更新追踪器（使用配置文件中的阈值）
+            # 初始化更新追踪器
             total_valid_entries = unwrapped_model.valid_mask.sum().item() if hasattr(unwrapped_model, 'valid_mask') else unwrapped_model.memory_bank.shape[0]
-            update_ratio_threshold = get_cfg_value("keys_recluster_update_ratio_threshold", MemoryUpdateConf.get("keys_recluster_update_ratio_threshold", 0.1))
             memory_update_tracker = MemoryUpdateTracker(
                 total_valid_entries=total_valid_entries,
-                update_ratio_threshold=update_ratio_threshold
+                update_ratio_threshold=1.0  # 不再用于 keys 重新聚类，设为 1.0 禁用
             )
             
             Logger(f"Memory Bank 更新组件初始化完成: 更新频率={get_cfg_value('memory_update_frequency', MemoryUpdateConf.get('memory_update_frequency', 100))}, 策略={get_cfg_value('memory_update_strategy', MemoryUpdateConf.get('memory_update_strategy', 'lru'))} (默认值来自 config/memory_update.py)", accelerator)
