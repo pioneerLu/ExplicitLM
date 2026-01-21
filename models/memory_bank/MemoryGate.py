@@ -35,6 +35,12 @@ class MemoryGate(nn.Module):
         
         # 批量处理 memory embeddings 的批次大小（用于节省显存）
         self.embed_batch_size = cfg.get("embed_batch_size", 64)
+        
+        # 缓存机制：避免每个 step 都重新计算 memory embeddings
+        # memory_bank 在训练时通常不变（除非通过 MemoryBankUpdater 更新）
+        # 缓存通过 clear_cache() 方法手动清除（在 memory_bank 更新后调用）
+        self._cached_memory_embeddings: Optional[torch.Tensor] = None
+        self._cached_memory_bank_key: Optional[tuple] = None  # (data_ptr, shape, device_str)
 
     def forward(
         self, 
@@ -65,10 +71,30 @@ class MemoryGate(nn.Module):
         query = self.query_proj(x_mean)  # [batch, query_dim]
         query_normalized = F.normalize(query, p=2, dim=-1)  # [batch, query_dim]
         
-        # 2. Compute all memory embeddings (batch processing for memory efficiency)
-        memory_embeddings = self._compute_memory_embeddings(
-            memory_bank, tok_embeddings, device
-        )  # [knowledge_num, query_dim]
+        # 2. Compute all memory embeddings (with caching)
+        # 使用简单的缓存键：data_ptr + shape + device
+        # 注意：如果 memory_bank 被 in-place 更新，data_ptr 不变，需要手动调用 clear_cache()
+        memory_bank_key = (
+            memory_bank.data_ptr() if memory_bank.is_cuda else id(memory_bank),
+            tuple(memory_bank.shape),
+            str(device)
+        )
+        
+        # 检查缓存是否有效
+        cache_valid = (
+            self._cached_memory_embeddings is not None and
+            self._cached_memory_bank_key == memory_bank_key and
+            self._cached_memory_embeddings.device == device
+        )
+        
+        if not cache_valid:
+            # 缓存失效，重新计算
+            self._cached_memory_embeddings = self._compute_memory_embeddings(
+                memory_bank, tok_embeddings, device
+            )  # [knowledge_num, query_dim]
+            self._cached_memory_bank_key = memory_bank_key
+        
+        memory_embeddings = self._cached_memory_embeddings
         
         # 3. Compute cosine similarity: query [batch, query_dim] @ memory [knowledge_num, query_dim].T
         # similarity: [batch, knowledge_num]
@@ -318,3 +344,11 @@ class MemoryGate(nn.Module):
             raise ValueError(f"Unknown loss_type: {self.loss_type}")
         
         return loss.mean()
+    
+    def clear_cache(self):
+        """
+        清除 memory embeddings 缓存。
+        当 memory_bank 被更新时（例如通过 MemoryBankUpdater 或 load_memory_bank），应该调用此方法。
+        """
+        self._cached_memory_embeddings = None
+        self._cached_memory_bank_key = None

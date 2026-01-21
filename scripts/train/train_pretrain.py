@@ -55,29 +55,27 @@ def freeze_parameters_for_fusion_training(model, accelerator, train_memory_gate=
     冻结参数：根据是否提供预训练权重决定训练策略
     
     如果 train_memory_gate=True（未提供预训练权重）：
-    - 训练：gated_memory_fusion, memory_norm, memory_gate（不包括 keys）
-    - 冻结：backbone, keys, memory_bank (通过 MemoryBankUpdater 更新)
+    - 训练：gated_memory_fusion, memory_norm, memory_gate
+    - 冻结：backbone, memory_bank (通过 MemoryBankUpdater 更新)
     
     如果 train_memory_gate=False（提供了预训练权重）：
     - 训练：gated_memory_fusion, memory_norm
-    - 冻结：backbone, memory_gate (包括 keys), memory_bank (通过 MemoryBankUpdater 更新)
+    - 冻结：backbone, memory_gate, memory_bank (通过 MemoryBankUpdater 更新)
     """
     if train_memory_gate:
-        Logger("设置参数冻结策略（Pretrain训练：训练 Fusion + MemoryGate，冻结 Keys）", accelerator)
+        Logger("设置参数冻结策略（Pretrain训练：训练 Fusion + MemoryGate）", accelerator)
     else:
-        Logger("设置参数冻结策略（Pretrain训练：只训练 Fusion，冻结 Keys 和 MemoryGate）", accelerator)
+        Logger("设置参数冻结策略（Pretrain训练：只训练 Fusion，冻结 MemoryGate）", accelerator)
     
     frozen_params = 0
     trainable_params = 0
     memory_bank_params = 0
-    keys_params = 0
     memory_gate_params = 0
     fusion_params = 0
     
     for name, param in model.named_parameters():
-        is_keys = "keys" in name and "memory_gate" in name
         is_memory_bank = "memory_bank" in name
-        is_memory_gate = "memory_gate" in name and not is_keys
+        is_memory_gate = "memory_gate" in name
         is_fusion_component = any(keyword in name for keyword in [
             "gated_memory_fusion",
             "memory_norm",
@@ -87,11 +85,6 @@ def freeze_parameters_for_fusion_training(model, accelerator, train_memory_gate=
             # Bank 不通过梯度更新，而是通过 MemoryBankUpdater 进行非梯度更新
             param.requires_grad = False
             memory_bank_params += param.numel()
-            frozen_params += param.numel()
-        elif is_keys:
-            # Keys 完全冻结
-            param.requires_grad = False
-            keys_params += param.numel()
             frozen_params += param.numel()
         elif is_memory_gate:
             # MemoryGate：根据是否提供预训练权重决定是否训练
@@ -117,7 +110,6 @@ def freeze_parameters_for_fusion_training(model, accelerator, train_memory_gate=
     
     Logger(f"参数冻结完成: 冻结 {frozen_params / 1e6:.3f}M, 可训练 {trainable_params / 1e6:.3f}M", accelerator)
     Logger(f"  - Memory bank: {memory_bank_params / 1e6:.3f}M (通过 MemoryBankUpdater 更新)", accelerator)
-    Logger(f"  - Keys: {keys_params / 1e6:.3f}M (冻结)", accelerator)
     if train_memory_gate:
         Logger(f"  - MemoryGate: {memory_gate_params / 1e6:.3f}M (可训练)", accelerator)
     else:
@@ -145,9 +137,8 @@ def save_trainable_components(model, save_path, accelerator, train_memory_gate=F
 
     # 保存可训练参数
     for name, param in model.named_parameters():
-        is_keys = "keys" in name and "memory_gate" in name
         is_memory_bank = "memory_bank" in name
-        is_memory_gate = "memory_gate" in name and not is_keys
+        is_memory_gate = "memory_gate" in name
         is_fusion_component = any(keyword in name for keyword in [
             "gated_memory_fusion",
             "memory_norm",

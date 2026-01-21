@@ -445,10 +445,14 @@ class Qwen3ExplicitLMBlock(nn.Module):
         memory_bank: Optional[torch.Tensor] = None,
         valid_mask: Optional[torch.Tensor] = None,
         tok_embeddings: Optional[nn.Embedding] = None,
+        precomputed_candidates: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, float], Dict[str, Union[torch.Tensor, float]]]:
         """
         主前向传播
+        
+        Args:
+            precomputed_candidates: 预计算的检索结果 (candidate_indices, candidate_scores)，如果提供则跳过检索步骤
         
         Returns:
             (output, similarity_loss, layer_stats, cosine_stats)
@@ -473,10 +477,14 @@ class Qwen3ExplicitLMBlock(nn.Module):
         # 3. 记忆检索模式
         h_for_memory = self.memory_norm(hidden_states)
         
-        # 4. 获取候选（直接 RAG 相似度查找）
-        candidate_indices, candidate_scores = self.memory_gate(
-            h_for_memory, memory_bank, tok_embeddings, valid_mask
-        )
+        # 4. 获取候选（如果提供了预计算的检索结果，则直接使用；否则进行检索）
+        if precomputed_candidates is not None:
+            candidate_indices, candidate_scores = precomputed_candidates
+        else:
+            # 获取候选（直接 RAG 相似度查找）
+            candidate_indices, candidate_scores = self.memory_gate(
+                h_for_memory, memory_bank, tok_embeddings, valid_mask
+            )
         
         # 5. 选择记忆
         selection_result = self._select_memory(

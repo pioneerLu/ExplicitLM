@@ -2,7 +2,7 @@
 
 # ========== 配置区域 ==========
 # 设置GPU可见设备（平衡显存）
-export CUDA_VISIBLE_DEVICES=0,1,2
+export CUDA_VISIBLE_DEVICES=0,4,5
 
 # 设置PyTorch内存分配配置（保持即可）
 export PYTORCH_ALLOC_CONF=expandable_segments:True
@@ -76,7 +76,7 @@ GUMBEL_TEMPERATURE=1.0 # Gumbel-Softmax 温度
 # 数据配置
 MAX_LENGTH=256         # 最大序列长度（参考 run_sft.sh）
 
-# 训练超参数（参考 run_sft.sh，但 fusion 训练通常使用更高的学习率）
+# 训练超参数
 LEARNING_RATE=1e-4     # Fusion 训练推荐 1e-4
 BATCH_SIZE=2          # 参考 run_sft.sh
 ACCUMULATION_STEPS=16 # 参考 run_sft.sh

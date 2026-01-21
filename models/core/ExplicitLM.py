@@ -134,9 +134,18 @@ class ExplicitLM(PreTrainedModel):
                 persistent=True,  # 持久化，确保保存和加载时包含
             )
             self.valid_mask = self.valid_mask.cpu()
+            
+            # 注册 memory_bank 版本号（用于缓存失效检测）
+            # 每次 memory_bank 更新时，版本号会递增，MemoryGate 可以检测到变化
+            self.register_buffer(
+                "_memory_bank_version",
+                torch.tensor(0, dtype=torch.long),
+                persistent=False,  # 不需要持久化，每次加载时重置为0
+            )
         else:
             # MOE 模式：不需要 memory_bank
             self.memory_bank = None
+            self._memory_bank_version = None
             print("🔥 MOE mode enabled: using Mixture of Experts instead of memory bank", flush=True)
 
         self.OUT = CausalLMOutputWithPast()
@@ -255,6 +264,15 @@ class ExplicitLM(PreTrainedModel):
         
         use_moe = self.memory_cfg.get("use_moe", False)
         
+        # 在 embedding 阶段进行一次检索（仅非 MoE 模式）
+        precomputed_candidates = None
+        if not use_moe and self.shared_memory_gate is not None:
+            # 使用输入 embedding 作为 query 进行检索
+            # inputs_embeds: [batch, seq_len, hidden_size]
+            precomputed_candidates = self.shared_memory_gate(
+                inputs_embeds, self.memory_bank, self.tok_embeddings, self.valid_mask
+            )
+        
         for layer_idx, layer in enumerate(self.layers):
             layer_attention_mask = causal_mask_mapping.get(
                 getattr(layer.qwen3_decoder, "attention_type", "full_attention"),
@@ -290,6 +308,7 @@ class ExplicitLM(PreTrainedModel):
                     memory_bank=self.memory_bank,
                     valid_mask=self.valid_mask,
                     tok_embeddings=self.tok_embeddings,
+                    precomputed_candidates=precomputed_candidates,
                     **kwargs,
                 )
                 # 使用非原地操作，避免对叶子变量进行原地操作

@@ -207,6 +207,12 @@ class MemoryBankUpdater:
                     self.usage_stats['access_count'][idx] = 1
                     self.access_counter += 1
         
+        # 清除 MemoryGate 的缓存（因为 memory_bank 已更新）
+        # 注意：memory_bank 是 in-place 更新的，所以 data_ptr 不会变，需要手动清除缓存
+        if hasattr(self.model, 'shared_memory_gate') and self.model.shared_memory_gate is not None:
+            if hasattr(self.model.shared_memory_gate, 'clear_cache'):
+                self.model.shared_memory_gate.clear_cache()
+        
         return {
             "updated_count": len(update_indices),
             "update_indices": update_indices,  # 返回所有更新的索引（用于追踪10%阈值）
