@@ -2,7 +2,7 @@
 
 # ========== 配置区域 ==========
 # 设置GPU可见设备（平衡显存）
-export CUDA_VISIBLE_DEVICES=0,4,5
+export CUDA_VISIBLE_DEVICES=6,7
 
 # 设置PyTorch内存分配配置（保持即可）
 export PYTORCH_ALLOC_CONF=expandable_segments:True
@@ -250,6 +250,22 @@ if [ "$ENABLE_MEMORY_UPDATE" = true ]; then
     TRAIN_ARGS+=(--llmlingua_model_path "$LLMLINGUA_MODEL_PATH")
 else
     echo "  - Memory 更新: 已禁用"
+fi
+
+# Oracle Fact Fusion 配置（用于测试上限）
+ENABLE_ORACLE_FACT_FUSION=true  # 设置为 true 启用 oracle fact fusion
+ORACLE_FACT_BANK_PATH="data/test_data/pretrain_facts_memory_bank.pt"
+ORACLE_FACT_MAPPING_PATH="data/test_data/pretrain_facts_mapping.pt"
+
+if [ "$ENABLE_ORACLE_FACT_FUSION" = true ]; then
+    echo "  - Oracle Fact Fusion: 已启用"
+    echo "    - Fact Bank: $ORACLE_FACT_BANK_PATH"
+    echo "    - Mapping: $ORACLE_FACT_MAPPING_PATH"
+    TRAIN_ARGS+=(--oracle_fact_fusion)
+    TRAIN_ARGS+=(--oracle_fact_bank_path "$ORACLE_FACT_BANK_PATH")
+    TRAIN_ARGS+=(--oracle_fact_mapping_path "$ORACLE_FACT_MAPPING_PATH")
+else
+    echo "  - Oracle Fact Fusion: 已禁用"
 fi
 
 # 执行训练

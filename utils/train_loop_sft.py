@@ -670,7 +670,7 @@ def train_epoch_sft(
                             should_sync_memory_bank = True
                         except Exception as e:
                             Logger(f"❌ Memory Update 失败: {e}", accelerator)
-                                
+                            
                     # 多卡同步
                                 if accelerator.num_processes > 1:
                         accelerator.wait_for_everyone()
@@ -680,7 +680,7 @@ def train_epoch_sft(
                         if not accelerator.is_main_process:
                             sync_mb_flag.zero_()
                         dist.broadcast(sync_mb_flag, src=0)
-                        
+                            
                         if sync_mb_flag.item() == 1:
                             mb_shape = unwrapped_model.memory_bank.shape
                             chunk_size = 5000
@@ -696,7 +696,7 @@ def train_epoch_sft(
                             
                             if accelerator.is_main_process:
                                 vm = unwrapped_model.valid_mask.clone().to(accelerator.device)
-                            else:
+                                        else:
                                 vm = torch.zeros(mb_shape[0], dtype=torch.bool, device=accelerator.device)
                             dist.broadcast(vm, src=0)
                             unwrapped_model.valid_mask.copy_(vm.cpu())
@@ -704,7 +704,7 @@ def train_epoch_sft(
                             if accelerator.is_main_process:
                                 Logger("✅ Memory Bank 同步完成", accelerator)
             finally:
-                accelerator.wait_for_everyone()
+                                accelerator.wait_for_everyone()
 
         # 更新进度条 - 只在主进程
         if accelerator.is_main_process and pbar is not None:

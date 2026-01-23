@@ -446,6 +446,7 @@ class Qwen3ExplicitLMBlock(nn.Module):
         valid_mask: Optional[torch.Tensor] = None,
         tok_embeddings: Optional[nn.Embedding] = None,
         precomputed_candidates: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        forced_memory_tokens: Optional[torch.Tensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, float], Dict[str, Union[torch.Tensor, float]]]:
         """
@@ -453,6 +454,7 @@ class Qwen3ExplicitLMBlock(nn.Module):
         
         Args:
             precomputed_candidates: 预计算的检索结果 (candidate_indices, candidate_scores)，如果提供则跳过检索步骤
+            forced_memory_tokens: 强制使用的 memory tokens [batch, knowledge_length]，如果提供则跳过检索，直接使用这些 tokens
         
         Returns:
             (output, similarity_loss, layer_stats, cosine_stats)
@@ -477,7 +479,51 @@ class Qwen3ExplicitLMBlock(nn.Module):
         # 3. 记忆检索模式
         h_for_memory = self.memory_norm(hidden_states)
         
-        # 4. 获取候选（如果提供了预计算的检索结果，则直接使用；否则进行检索）
+        # 4. 如果提供了 forced_memory_tokens，直接使用（跳过检索）
+        if forced_memory_tokens is not None:
+            # forced_memory_tokens: [batch, knowledge_length]
+            bsz, seq_len, hidden_size = h_for_memory.shape
+            device = h_for_memory.device
+            
+            # 将 tokens 转换为 embeddings
+            if tok_embeddings is None:
+                raise ValueError("forced_memory_tokens 需要 tok_embeddings")
+            
+            # 计算 mean pooling（考虑 pad tokens）
+            pad_token_id = 0
+            memory_embeddings = tok_embeddings(forced_memory_tokens)  # [batch, knowledge_length, hidden_size]
+            attention_mask = (forced_memory_tokens != pad_token_id).long()  # [batch, knowledge_length]
+            mask = attention_mask.unsqueeze(-1).to(dtype=memory_embeddings.dtype)  # [batch, knowledge_length, 1]
+            sum_hidden = (memory_embeddings * mask).sum(dim=1)  # [batch, hidden_size]
+            len_hidden = mask.sum(dim=1).clamp(min=1e-6)  # [batch, 1]
+            selected_memory_flat = sum_hidden / len_hidden  # [batch, hidden_size]
+            
+            # 广播到 [batch, seq_len, hidden_size]
+            selected_memory = selected_memory_flat.unsqueeze(1).expand(-1, seq_len, -1)
+            
+            # 构造假的 selection_result
+            selection_result = MemorySelectionResult(
+                selected_memory=selected_memory,
+                selection_weights=torch.ones(bsz, seq_len, 1, device=device, dtype=selected_memory.dtype),  # [batch, seq_len, 1]
+                selected_indices=torch.zeros(bsz, seq_len, dtype=torch.long, device=device),  # [batch, seq_len]
+                actual_memory_indices=torch.zeros(bsz, seq_len, dtype=torch.long, device=device),  # [batch, seq_len]
+                similarity_scores=torch.zeros(bsz, seq_len, 1, device=device, dtype=selected_memory.dtype),  # [batch, seq_len, 1]
+                selected_similarities=torch.zeros(bsz, seq_len, device=device, dtype=selected_memory.dtype),  # [batch, seq_len]
+            )
+            
+            # 融合记忆
+            output = self._fuse_memory(hidden_states, h_for_memory, selection_result)
+            
+            # 损失设为 0（因为不进行检索，无法计算相似度损失）
+            similarity_loss = torch.tensor(0.0, device=device, requires_grad=False)
+            
+            # 统计信息
+            layer_stats, cosine_stats = self._compute_stats(selection_result)
+            
+            return output, similarity_loss, layer_stats, cosine_stats
+        
+        # 5. 正常检索模式（原有逻辑）
+        # 获取候选（如果提供了预计算的检索结果，则直接使用；否则进行检索）
         if precomputed_candidates is not None:
             candidate_indices, candidate_scores = precomputed_candidates
         else:
@@ -486,22 +532,22 @@ class Qwen3ExplicitLMBlock(nn.Module):
                 h_for_memory, memory_bank, tok_embeddings, valid_mask
             )
         
-        # 5. 选择记忆
+        # 6. 选择记忆
         selection_result = self._select_memory(
             h_for_memory, candidate_indices, candidate_scores,
             memory_bank, tok_embeddings, valid_mask
         )
         
-        # 6. 融合记忆
+        # 7. 融合记忆
         output = self._fuse_memory(hidden_states, h_for_memory, selection_result)
         
-        # 7. 计算损失
+        # 8. 计算损失
         similarity_loss = self._compute_memory_loss(
             h_for_memory, selection_result, memory_bank, 
             tok_embeddings, valid_mask
         )
         
-        # 8. 统计信息（仅训练时）
+        # 9. 统计信息（仅训练时）
         layer_stats, cosine_stats = self._compute_stats(selection_result)
         
         return output, similarity_loss, layer_stats, cosine_stats

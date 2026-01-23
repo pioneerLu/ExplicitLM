@@ -205,6 +205,7 @@ class ExplicitLM(PreTrainedModel):
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         step: Optional[int] = None,  # 兼容旧接口（已废弃）
+        forced_memory_tokens: Optional[torch.Tensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> CausalLMOutputWithPast:
         """
@@ -309,6 +310,7 @@ class ExplicitLM(PreTrainedModel):
                     valid_mask=self.valid_mask,
                     tok_embeddings=self.tok_embeddings,
                     precomputed_candidates=precomputed_candidates,
+                    forced_memory_tokens=forced_memory_tokens,
                     **kwargs,
                 )
                 # 使用非原地操作，避免对叶子变量进行原地操作

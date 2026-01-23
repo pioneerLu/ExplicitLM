@@ -20,7 +20,7 @@ class MemoryGate(nn.Module):
         self.num_candidates = cfg.get("num_candidates", 32)
         
         self.knowledge_num = cfg.get("knowledge_num", 100*100)
-        
+
         # Query Projection: input_dim -> query_dim
         self.query_proj = nn.Linear(self.input_dim, self.query_dim, bias=False)
         
@@ -32,10 +32,10 @@ class MemoryGate(nn.Module):
         self.margin_temperature = cfg.get("margin_temperature", 1.0)  # 控制 soft margin 的软度
         self.loss_type = cfg.get("relative_loss_type", "softplus")  # "softplus" 或 "sigmoid"
         self.exclude_target_from_baseline = cfg.get("exclude_target_from_baseline", True)  # 是否从基线中排除目标样本
-        
+    
         # 批量处理 memory embeddings 的批次大小（用于节省显存）
         self.embed_batch_size = cfg.get("embed_batch_size", 64)
-        
+            
         # 缓存机制：避免每个 step 都重新计算 memory embeddings
         # memory_bank 在训练时通常不变（除非通过 MemoryBankUpdater 更新）
         # 缓存通过 clear_cache() 方法手动清除（在 memory_bank 更新后调用）
@@ -59,8 +59,8 @@ class MemoryGate(nn.Module):
             valid_mask: Valid mask [knowledge_num] (optional)
             
         Returns:
-            candidate_indices: [batch, seq_len, num_candidates]
-            candidate_scores: [batch, seq_len, num_candidates]
+                candidate_indices: [batch, seq_len, num_candidates]
+                candidate_scores: [batch, seq_len, num_candidates]
         """
         bsz, seq_len, _ = x.shape
         device = x.device

@@ -276,6 +276,11 @@ def main():
     parser.add_argument("--swanlab_project", type=str, default="explicitlm-fusion", help="SwanLab 项目名")
     parser.add_argument("--swanlab_online", action="store_true", help="使用 SwanLab 在线模式")
     
+    # Oracle Fact Fusion 配置（用于测试上限）
+    parser.add_argument("--oracle_fact_fusion", action="store_true", help="启用 oracle fact fusion（直接使用真实 facts，跳过检索）")
+    parser.add_argument("--oracle_fact_bank_path", type=str, default=None, help="Oracle fact memory bank 路径（.pt 文件）")
+    parser.add_argument("--oracle_fact_mapping_path", type=str, default=None, help="Oracle fact mapping 路径（.pt 文件，包含 uuid_to_fact_indices）")
+    
     args = parser.parse_args()
     
     # 初始化 Accelerator
@@ -318,6 +323,21 @@ def main():
     model, tokenizer = init_model(model_args, accelerator)
     Logger("模型初始化完成", accelerator)
     
+    # 加载 Oracle Fact Fusion 相关数据（如果启用）
+    oracle_fact_bank = None
+    oracle_fact_mapping = None
+    if args.oracle_fact_fusion:
+        if not args.oracle_fact_bank_path or not args.oracle_fact_mapping_path:
+            raise ValueError("启用 --oracle_fact_fusion 需要同时提供 --oracle_fact_bank_path 和 --oracle_fact_mapping_path")
+        
+        Logger(f"加载 Oracle Fact Bank: {args.oracle_fact_bank_path}", accelerator)
+        oracle_fact_bank_data = torch.load(args.oracle_fact_bank_path, map_location='cpu')
+        oracle_fact_bank = oracle_fact_bank_data["memory_bank"]  # [N_facts, knowledge_length]
+        
+        Logger(f"加载 Oracle Fact Mapping: {args.oracle_fact_mapping_path}", accelerator)
+        oracle_fact_mapping = torch.load(args.oracle_fact_mapping_path, map_location='cpu')
+        Logger(f"Oracle Fact Bank 形状: {oracle_fact_bank.shape}, 映射条目数: {len(oracle_fact_mapping['uuid_to_fact_indices'])}", accelerator)
+    
 
     has_pretrained_memory_gate = False
     if args.pretrained_memory_gate_path and os.path.exists(args.pretrained_memory_gate_path):
@@ -345,6 +365,7 @@ def main():
     if args.val_split_ratio > 0.0 or args.val_split_size is not None:
         Logger(f"从训练数据中分割验证集: ratio={args.val_split_ratio}, size={args.val_split_size}", accelerator)
         train_loader, val_loader = create_pretrain_dataloader(
+            return_uuids=args.oracle_fact_fusion,
             data_path=args.dataset_path,
             tokenizer=tokenizer,
             batch_size=args.batch_size,
@@ -364,6 +385,7 @@ def main():
         max_length=args.max_length,
         shuffle=True,
         num_workers=0,  # 分布式训练中设置为 0 避免死锁
+            return_uuids=args.oracle_fact_fusion,
     )
     
     val_loader = None
@@ -524,7 +546,12 @@ def main():
             # 在数据加载前开始计时
             data_load_start = time.time()
             try:
-                (X, Y, loss_mask) = next(train_iter)
+                batch_data = next(train_iter)
+                if args.oracle_fact_fusion:
+                    X, Y, loss_mask, batch_uuids = batch_data
+                else:
+                    X, Y, loss_mask = batch_data
+                    batch_uuids = None
             except StopIteration:
                 # 数据加载完成，退出循环
                 if accelerator.is_main_process:
@@ -553,9 +580,52 @@ def main():
             # 使用 accelerator.accumulate() 上下文管理器自动处理梯度累积
             # 这确保在 DeepSpeed Stage2 下，所有 rank 的 collective 操作完全同步
             with accelerator.accumulate(model):
+                # 如果启用 oracle_fact_fusion，根据 batch_uuids 查找对应的 facts
+                forced_memory_tokens = None
+                if args.oracle_fact_fusion and batch_uuids is not None:
+                    # 从 mapping 中查找每个 uuid 对应的 fact indices
+                    uuid_to_indices = oracle_fact_mapping['uuid_to_fact_indices']
+                    fact_indices_list = []
+                    for uuid in batch_uuids:
+                        uuid_str = str(uuid)
+                        if uuid_str not in uuid_to_indices:
+                            raise ValueError(
+                                f"❌ Oracle Fact Fusion 错误: 找不到 UUID '{uuid_str}' 对应的 fact index。"
+                                f"请检查 pretrain_facts_mapping.pt 是否包含所有训练样本的 UUID。"
+                            )
+                        
+                        # 取第一个 fact（简化处理）
+                        fact_indices = uuid_to_indices[uuid_str]
+                        if isinstance(fact_indices, torch.Tensor):
+                            if fact_indices.numel() == 0:
+                                raise ValueError(
+                                    f"❌ Oracle Fact Fusion 错误: UUID '{uuid_str}' 对应的 fact_indices 为空。"
+                                )
+                            fact_idx = fact_indices[0].item()
+                        else:
+                            if len(fact_indices) == 0:
+                                raise ValueError(
+                                    f"❌ Oracle Fact Fusion 错误: UUID '{uuid_str}' 对应的 fact_indices 为空。"
+                                )
+                            fact_idx = fact_indices[0]
+                        
+                        # 验证索引是否有效
+                        if fact_idx < 0 or fact_idx >= oracle_fact_bank.shape[0]:
+                            raise ValueError(
+                                f"❌ Oracle Fact Fusion 错误: UUID '{uuid_str}' 对应的 fact index {fact_idx} "
+                                f"超出范围 [0, {oracle_fact_bank.shape[0]})。"
+                            )
+                        
+                        fact_indices_list.append(fact_idx)
+                    
+                    # 从 fact bank 中获取对应的 tokens
+                    # 注意：索引必须在 CPU 上，因为 oracle_fact_bank 在 CPU 上
+                    fact_indices_tensor = torch.tensor(fact_indices_list, dtype=torch.long, device='cpu')
+                    forced_memory_tokens = oracle_fact_bank[fact_indices_tensor].to(X.device)  # [batch, knowledge_length]
+                
                 # 前向传播计时
                 t_fwd_start = time.time()
-                res = model(X)
+                res = model(X, forced_memory_tokens=forced_memory_tokens)
                 forward_time = time.time() - t_fwd_start
                 
                 # 计算 CE Loss + baseline_loss + total_loss 计时
@@ -683,7 +753,7 @@ def main():
                         
                         should_update = bool(should_update_tensor.item())
                         should_sync_memory_bank = False
-                            
+                        
                         if should_update:
                             # 主进程执行更新
                             if accelerator.is_main_process:
@@ -705,7 +775,7 @@ def main():
                                     Logger(f"❌ Memory Update 失败: {e}", accelerator)
                             
                             # 多卡同步
-                            if accelerator.num_processes > 1:
+                                if accelerator.num_processes > 1:
                                 accelerator.wait_for_everyone()
                                 
                                 # 同步 Memory Bank
@@ -721,16 +791,16 @@ def main():
                                     
                                     for start in range(0, mb_shape[0], chunk_size):
                                         end = min(start + chunk_size, mb_shape[0])
-                                        if accelerator.is_main_process:
+                                    if accelerator.is_main_process:
                                             chunk = unwrapped_model.memory_bank[start:end].clone().to(accelerator.device)
-                                        else:
+                                    else:
                                             chunk = torch.zeros(end - start, mb_shape[1], dtype=torch.int64, device=accelerator.device)
                                         dist.broadcast(chunk, src=0)
                                         unwrapped_model.memory_bank[start:end] = chunk.cpu()
                                     
-                                    if accelerator.is_main_process:
+                                if accelerator.is_main_process:
                                         vm = unwrapped_model.valid_mask.clone().to(accelerator.device)
-                                    else:
+                                else:
                                         vm = torch.zeros(mb_shape[0], dtype=torch.bool, device=accelerator.device)
                                     dist.broadcast(vm, src=0)
                                     unwrapped_model.valid_mask.copy_(vm.cpu())
@@ -738,7 +808,7 @@ def main():
                                     if accelerator.is_main_process:
                                         Logger("✅ Memory Bank 同步完成", accelerator)
                 finally:
-                    accelerator.wait_for_everyone()
+                accelerator.wait_for_everyone()
                 
                 update_time = time.time() - update_start_time
 
