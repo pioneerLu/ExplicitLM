@@ -80,6 +80,7 @@ class FactExtractor:
         self,
         text: str,
         return_annotations: bool = False,
+        compression_rate: Optional[float] = None,
     ) -> Dict[str, any]:
         """
         从文本中提取浓缩事实
@@ -87,6 +88,7 @@ class FactExtractor:
         Args:
             text: 输入文本
             return_annotations: 是否返回标注信息（哪些token被保留/删除）
+            compression_rate: 可选，动态指定压缩率（如果为None，使用初始化时的compression_rate）
         
         Returns:
             {
@@ -105,6 +107,9 @@ class FactExtractor:
                 'compression_ratio': 0.0,
                 'annotations': [],
             }
+        
+        # 使用动态压缩率或默认压缩率
+        actual_compression_rate = compression_rate if compression_rate is not None else self.compression_rate
         
         try:
             # compress_prompt_llmlingua2 需要 context 参数为 List[str]，而不是单个字符串
@@ -128,7 +133,7 @@ class FactExtractor:
             
             results = self.compressor.compress_prompt_llmlingua2(
                 context_list,  # 传入字符串列表
-                rate=self.compression_rate,
+                rate=actual_compression_rate,
                 force_tokens=self.force_tokens,
                 chunk_end_tokens=self.chunk_end_tokens,
                 return_word_label=return_annotations,

@@ -64,33 +64,37 @@ def _get_cache_path(data_path: str, max_length: int, num_samples: Optional[int] 
     return os.path.join(TOKENIZER_CACHE_DIR, cache_filename)
 
 
-def build_pretrain_collate_fn(pad_token_id: int):
+def build_pretrain_collate_fn(pad_token_id: int, return_uuids: bool = False):
     """
     返回用于 PretrainDataset / ValidationDataset 的 collate_fn：
     
-    - 输入：List[1D LongTensor]，每个为一条未 padding 的 token 序列
-    - 输出：(X, Y, loss_mask)，形状为:
+    - 输入：List[(1D LongTensor, uuid)]，每个为一条未 padding 的 token 序列和对应的 uuid
+    - 输出：(X, Y, loss_mask) 或 (X, Y, loss_mask, batch_uuids)，形状为:
         X: [batch_size, max_seq_len-1]
         Y: [batch_size, max_seq_len-1]
         loss_mask: [batch_size, max_seq_len-1] (bool)
+        batch_uuids: List[str] (可选)
     - 在 batch 内按最长序列做 dynamic padding
     """
     
-    def collate_fn(batch: List[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        batch = [seq for seq in batch if seq is not None and seq.numel() >= 2]
-        if len(batch) == 0:
+    def collate_fn(batch: List[Tuple[torch.Tensor, str]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[str]]:
+        # 分离 sequences 和 uuids
+        sequences = [item[0] for item in batch if item[0] is not None and item[0].numel() >= 2]
+        uuids = [item[1] for item in batch if item[0] is not None and item[0].numel() >= 2]
+        
+        if len(sequences) == 0:
             raise ValueError("collate_fn 收到空 batch 或所有样本长度不足 2。")
     
-        batch_sizes = [seq.size(0) for seq in batch]
+        batch_sizes = [seq.size(0) for seq in sequences]
         max_len = max(batch_sizes)
     
         padded = torch.full(
-            (len(batch), max_len),
+            (len(sequences), max_len),
             fill_value=pad_token_id,
             dtype=torch.long,
         )
     
-        for i, seq in enumerate(batch):
+        for i, seq in enumerate(sequences):
             cur_len = seq.size(0)
             padded[i, :cur_len] = seq
     
@@ -98,7 +102,10 @@ def build_pretrain_collate_fn(pad_token_id: int):
         Y = padded[:, 1:]
         loss_mask = (Y != pad_token_id)
     
-        return X, Y, loss_mask
+        if return_uuids:
+            return X, Y, loss_mask, uuids
+        else:
+            return X, Y, loss_mask
     
     return collate_fn
 
@@ -122,7 +129,7 @@ class PretrainDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = max_length
 
-        # 加载原始样本（仅 text）
+        # 加载原始样本（包含 text 和 uuid）
         self.samples: List[Dict[str, Any]] = self._load_data(data_path)
 
         # 只探测一次 Qwen 对 <|im_start|> / <|im_end|> 的支持
@@ -151,14 +158,16 @@ class PretrainDataset(Dataset):
 
         self.use_im_tokens = bool(has_im_start and has_im_end)
 
-        # 检查缓存
+        # 检查缓存（注意：缓存不包含 uuid，需要重新 tokenize 时保留 uuid）
         cache_path = _get_cache_path(data_path, max_length)
+        cache_uuid_path = cache_path.replace('.pt', '_uuids.pt')
         
-        if os.path.exists(cache_path):
+        if os.path.exists(cache_path) and os.path.exists(cache_uuid_path):
             # 从缓存加载
             print(f"从缓存加载 tokenized 数据: {cache_path}")
             try:
                 self.input_id_seqs = torch.load(cache_path, map_location='cpu')
+                self.sample_uuids = torch.load(cache_uuid_path, map_location='cpu')
                 print(f"成功加载 {len(self.input_id_seqs)} 个 tokenized 样本")
                 return
             except Exception as e:
@@ -167,6 +176,7 @@ class PretrainDataset(Dataset):
         # 预编码所有样本为 token id 序列（不做 padding）
         print(f"开始 tokenize {len(self.samples)} 个样本...")
         self.input_id_seqs: List[torch.Tensor] = []
+        self.sample_uuids: List[str] = []
         for sample in self.samples:
             text = str(sample['text'])
 
@@ -197,11 +207,19 @@ class PretrainDataset(Dataset):
                 continue
 
             self.input_id_seqs.append(input_ids)
+            # 保存对应的 uuid（必须存在）
+            if 'uuid' not in sample:
+                raise ValueError(f"样本缺少 uuid 字段。样本内容: {sample.get('text', '')[:100]}...")
+            uuid = sample['uuid']
+            if not uuid or uuid == '':
+                raise ValueError(f"样本的 uuid 为空。样本内容: {sample.get('text', '')[:100]}...")
+            self.sample_uuids.append(str(uuid))
         
         # 保存缓存
         print(f"Tokenize 完成，保存缓存到: {cache_path}")
         try:
             torch.save(self.input_id_seqs, cache_path)
+            torch.save(self.sample_uuids, cache_uuid_path)
             print(f"缓存保存成功: {len(self.input_id_seqs)} 个样本")
         except Exception as e:
             print(f"警告: 保存缓存失败 ({e})")
@@ -236,16 +254,32 @@ class PretrainDataset(Dataset):
             path: JSONL文件路径
 
         Returns:
-            样本列表，每个样本为包含'text'字段的字典
+            样本列表，每个样本为包含'text'和'uuid'字段的字典
         """
         samples = []
         with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
+            for line_num, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:  # 跳过空行
                     continue
-                data = json.loads(line)
-                samples.append(data)
+                try:
+                    data = json.loads(line)
+                    # 检查必需的字段
+                    if 'text' not in data:
+                        raise ValueError(f"JSONL 文件 {path} 第 {line_num} 行缺少 'text' 字段")
+                    if 'uuid' not in data:
+                        raise ValueError(
+                            f"JSONL 文件 {path} 第 {line_num} 行缺少 'uuid' 字段。"
+                            f"Oracle Fact Fusion 需要 uuid 字段来建立映射关系。"
+                        )
+                    if data.get('uuid') is None or data.get('uuid') == '':
+                        raise ValueError(
+                            f"JSONL 文件 {path} 第 {line_num} 行的 uuid 为空。"
+                            f"Oracle Fact Fusion 要求所有样本都有有效的 uuid。"
+                        )
+                    samples.append(data)
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"JSONL 文件 {path} 第 {line_num} 行 JSON 解析失败: {e}")
         return samples
     
     def _load_parquet(self, path: str) -> List[Dict[str, Any]]:
@@ -296,11 +330,19 @@ class PretrainDataset(Dataset):
         dataset = ds.dataset(expanded_paths, format="parquet")
         schema_names = set(dataset.schema.names)
         
-        # 预训练数据集只需要 'text' 列
+        # 预训练数据集需要 'text' 和 'uuid' 列
         if "text" not in schema_names:
             raise ValueError(f"Parquet 缺少 'text' 列，无法用于预训练。可用列: {schema_names}")
         
-        table = dataset.to_table(columns=["text"])
+        if "uuid" not in schema_names:
+            raise ValueError(
+                f"Parquet 缺少 'uuid' 列，无法用于预训练。可用列: {schema_names}\n"
+                f"Oracle Fact Fusion 需要 uuid 字段来建立映射关系，请确保数据包含 uuid 列。"
+            )
+        
+        # 加载 text 和 uuid 列
+        columns_to_load = ["text", "uuid"]
+        table = dataset.to_table(columns=columns_to_load)
         
         samples: List[Dict[str, Any]] = []
         skipped_count = 0
@@ -312,7 +354,23 @@ class PretrainDataset(Dataset):
                     skipped_count += 1
                     continue
                 
-                samples.append({"text": str(text).strip()})
+                # 检查 uuid 是否存在且不为 None
+                if "uuid" not in row:
+                    raise ValueError(f"Parquet 文件第 {idx} 行缺少 uuid 字段")
+                
+                uuid_val = row.get("uuid")
+                if uuid_val is None:
+                    raise ValueError(
+                        f"Parquet 文件第 {idx} 行的 uuid 为 None。"
+                        f"Oracle Fact Fusion 要求所有样本都有有效的 uuid。"
+                    )
+                
+                sample = {
+                    "text": str(text).strip(),
+                    "uuid": str(uuid_val)
+                }
+                
+                samples.append(sample)
             except Exception as e:
                 skipped_count += 1
                 if skipped_count <= 20:
@@ -327,11 +385,11 @@ class PretrainDataset(Dataset):
     def __len__(self) -> int:
         return len(self.input_id_seqs)
 
-    def __getitem__(self, index: int) -> torch.Tensor:
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, str]:
         """
-        返回一段未 padding 的 token id 序列（1D LongTensor）
+        返回 (token id 序列, uuid)
         """
-        return self.input_id_seqs[index]
+        return self.input_id_seqs[index], self.sample_uuids[index]
 
 
 def create_pretrain_dataloader(
@@ -343,10 +401,14 @@ def create_pretrain_dataloader(
     num_workers: int = 0,
     pin_memory: bool = True,
     val_split_ratio: float = 0.0,
-    val_split_size: Optional[int] = None
+    val_split_size: Optional[int] = None,
+    return_uuids: bool = False,
 ) -> Union[DataLoader, Tuple[DataLoader, DataLoader]]:
     """
     创建预训练数据加载器（tokenizer 仅在 Dataset 初始化阶段调用一次）
+    
+    Args:
+        return_uuids: 是否在 collate_fn 中返回 uuids
     """
     dataset = PretrainDataset(
         data_path=data_path,
@@ -354,7 +416,7 @@ def create_pretrain_dataloader(
         max_length=max_length
     )
 
-    collate_fn = build_pretrain_collate_fn(pad_token_id=tokenizer.pad_token_id)
+    collate_fn = build_pretrain_collate_fn(pad_token_id=tokenizer.pad_token_id, return_uuids=return_uuids)
 
     val_loader = None
     if val_split_ratio > 0.0 or val_split_size is not None:
@@ -599,11 +661,11 @@ class ValidationDataset(Dataset):
     def __len__(self) -> int:
         return len(self.input_id_seqs)
 
-    def __getitem__(self, index: int) -> torch.Tensor:
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, str]:
         """
-        返回一段未 padding 的 token id 序列（1D LongTensor）
+        返回 (token id 序列, uuid)
         """
-        return self.input_id_seqs[index]
+        return self.input_id_seqs[index], self.sample_uuids[index]
 
 
 def create_validation_dataloader(
