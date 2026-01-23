@@ -57,3 +57,6 @@ swanlab/
 # Nested git repos (external datasets)
 data/hg_data/MedQA-USMLE-4-options/
 data/hg_data/mmlu/
+
+# test_data 目录不提交
+data/test_data/
