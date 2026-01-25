@@ -60,3 +60,8 @@ data/hg_data/mmlu/
 
 # test_data 目录不提交
 data/test_data/
+
+# DVC 相关文件（不上传）
+.dvc/
+*.dvc
+.dvcignore
