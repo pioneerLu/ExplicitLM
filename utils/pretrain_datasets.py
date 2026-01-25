@@ -263,7 +263,7 @@ class PretrainDataset(Dataset):
                 if not line:  # 跳过空行
                     continue
                 try:
-                    data = json.loads(line)
+                data = json.loads(line)
                     # 检查必需的字段
                     if 'text' not in data:
                         raise ValueError(f"JSONL 文件 {path} 第 {line_num} 行缺少 'text' 字段")
@@ -277,7 +277,7 @@ class PretrainDataset(Dataset):
                             f"JSONL 文件 {path} 第 {line_num} 行的 uuid 为空。"
                             f"Oracle Fact Fusion 要求所有样本都有有效的 uuid。"
                         )
-                    samples.append(data)
+                samples.append(data)
                 except json.JSONDecodeError as e:
                     raise ValueError(f"JSONL 文件 {path} 第 {line_num} 行 JSON 解析失败: {e}")
         return samples

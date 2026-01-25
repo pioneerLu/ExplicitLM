@@ -57,10 +57,60 @@ class FactExtractor:
                 f"请运行 bert/get_model.py 下载模型"
             )
         
-        self.compressor = PromptCompressor(
-            model_name=self.model_path,
-            use_llmlingua2=True
-        )
+        # 在初始化 PromptCompressor 之前，设置 torch 的默认设备
+        # 注意：CUDA_VISIBLE_DEVICES 已在进程启动时设置，这里不再修改
+        # 如果设置了 CUDA_VISIBLE_DEVICES，在子进程中只有 cuda:0 可见
+        if self.device != "cpu":
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    # 由于 CUDA_VISIBLE_DEVICES 已设置，只有 cuda:0 可见，所以总是使用 0
+                    torch.cuda.set_device(0)
+            except Exception:
+                pass
+        
+        # 初始化PromptCompressor，如果支持device参数则传入
+        compressor_kwargs = {
+            "model_name": self.model_path,
+            "use_llmlingua2": True
+        }
+        # 尝试传入device参数（如果PromptCompressor支持）
+        try:
+            import inspect
+            sig = inspect.signature(PromptCompressor.__init__)
+            if 'device' in sig.parameters:
+                compressor_kwargs['device'] = self.device
+        except Exception:
+            pass  # 如果不支持device参数，忽略
+        
+        self.compressor = PromptCompressor(**compressor_kwargs)
+        
+        # 如果PromptCompressor不支持device参数，手动设置模型到指定设备
+        if self.device != "cpu" and hasattr(self.compressor, 'model'):
+            try:
+                import torch
+                # 强制将模型移动到指定设备
+                self.compressor.model = self.compressor.model.to(self.device)
+                # 确保模型的所有参数都在指定设备上
+                if hasattr(self.compressor.model, 'to'):
+                    self.compressor.model = self.compressor.model.to(self.device)
+                # 验证模型是否在正确的设备上
+                if hasattr(self.compressor.model, 'parameters'):
+                    for param in self.compressor.model.parameters():
+                        if param.device.type != self.device.split(':')[0] or (self.device.startswith('cuda:') and param.device.index != int(self.device.split(':')[1])):
+                            param.data = param.data.to(self.device)
+            except Exception as e:
+                # 如果无法移动模型，继续使用原设备（不打印警告，避免多进程输出混乱）
+                pass
+        
+        # 如果 compressor 有 tokenizer，也移动到指定设备
+        if self.device != "cpu" and hasattr(self.compressor, 'tokenizer'):
+            try:
+                # tokenizer 通常不需要移动，但检查一下
+                pass
+            except Exception:
+                pass
+        
         # 修复NotImplementedError: is_begin_of_new_word函数需要识别模型名称
         if hasattr(self.compressor, 'model_name'):
             model_name_str = str(self.compressor.model_name).lower()
@@ -108,6 +158,17 @@ class FactExtractor:
                 'annotations': [],
             }
         
+        # 在调用压缩之前，确保模型在正确的设备上
+        if self.device != "cpu" and torch.cuda.is_available():
+            try:
+                # 确保当前线程使用正确的设备
+                if self.device.startswith("cuda:"):
+                    device_idx = int(self.device.split(":")[1])
+                    if device_idx < torch.cuda.device_count():
+                        torch.cuda.set_device(device_idx)
+            except Exception:
+                pass
+        
         # 使用动态压缩率或默认压缩率
         actual_compression_rate = compression_rate if compression_rate is not None else self.compression_rate
         
@@ -130,6 +191,17 @@ class FactExtractor:
             # 如果没有分割出句子，使用整个文本
             if not context_list:
                 context_list = [text]
+            
+            # 在调用压缩之前，确保模型在正确的设备上
+            # 注意：CUDA_VISIBLE_DEVICES 已在进程启动时设置，这里只确保模型在 cuda:0 上
+            if self.device != "cpu" and hasattr(self.compressor, 'model'):
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        # 由于 CUDA_VISIBLE_DEVICES 已设置，只有 cuda:0 可见
+                        self.compressor.model = self.compressor.model.to("cuda:0")
+                except Exception:
+                    pass
             
             results = self.compressor.compress_prompt_llmlingua2(
                 context_list,  # 传入字符串列表

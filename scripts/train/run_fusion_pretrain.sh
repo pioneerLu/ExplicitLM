@@ -2,7 +2,7 @@
 
 # ========== 配置区域 ==========
 # 设置GPU可见设备（平衡显存）
-export CUDA_VISIBLE_DEVICES=6,7
+export CUDA_VISIBLE_DEVICES=5,6
 
 # 设置PyTorch内存分配配置（保持即可）
 export PYTORCH_ALLOC_CONF=expandable_segments:True
@@ -78,7 +78,7 @@ MAX_LENGTH=256         # 最大序列长度（参考 run_sft.sh）
 
 # 训练超参数
 LEARNING_RATE=1e-4     # Fusion 训练推荐 1e-4
-BATCH_SIZE=2          # 参考 run_sft.sh
+BATCH_SIZE=6          # 参考 run_sft.sh
 ACCUMULATION_STEPS=16 # 参考 run_sft.sh
 EPOCHS=1               # 参考 run_sft.sh
 WARMUP_STEPS=100

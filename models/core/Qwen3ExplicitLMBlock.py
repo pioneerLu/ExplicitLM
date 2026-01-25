@@ -245,8 +245,12 @@ class Qwen3ExplicitLMBlock(nn.Module):
             candidate_indices, memory_bank, valid_mask
         )
         
-        # 过滤无效候选
-        similarity_scores = similarity_scores.masked_fill(~candidate_valid, -1e9)
+        # 过滤无效候选（使用 float32 避免 float16 溢出）
+        fill_value = torch.tensor(-1e9, dtype=similarity_scores.dtype, device=similarity_scores.device)
+        # 对于 float16，使用更小的值避免溢出
+        if similarity_scores.dtype == torch.float16:
+            fill_value = torch.tensor(-1e4, dtype=torch.float16, device=similarity_scores.device)
+        similarity_scores = similarity_scores.masked_fill(~candidate_valid, fill_value)
         
         return similarity_scores
 
