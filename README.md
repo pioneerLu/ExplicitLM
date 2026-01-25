@@ -91,10 +91,16 @@ Oracle Fact Fusion 模式用于测试 Fusion 组件的理论上限，直接使�
 bash scripts/train/run_fusion_pretrain.sh
 ```
 
-**修改 Oracle Fact 数据路径**：
+**修改数据路径**：
 
-在 `scripts/train/run_fusion_pretrain.sh` 中修改以下配置（第 256-258 行）：
+在 `scripts/train/run_fusion_pretrain.sh` 中修改以下配置：
 
+1. **训练样本数据路径**（第 65 行）：
+```bash
+PRETRAIN_DATASET_PATH="data/parquet_data/sample_256"  # 训练数据路径（Parquet 目录）
+```
+
+2. **Oracle Fact 数据路径**（第 256-258 行）：
 ```bash
 ENABLE_ORACLE_FACT_FUSION=true  # 设置为 true 启用
 ORACLE_FACT_BANK_PATH="data/pretrain_facts_memory_bank.pt"      # Fact Bank 路径
@@ -102,9 +108,10 @@ ORACLE_FACT_MAPPING_PATH="data/pretrain_facts_mapping.pt"       # UUID 映射路
 ```
 
 **必需文件**：
-- `pretrain_facts_memory_bank.pt`: Oracle Fact Bank（tokenized facts）
-- `pretrain_facts_mapping.pt`: UUID 到 Fact 索引的映射
-- 训练数据需包含 UUID 字段，且 UUID 必须在 mapping 中存在
+- `data/parquet_data/sample_256/`: 训练样本数据目录（Parquet 格式，需包含 UUID 字段）
+- `data/pretrain_facts_memory_bank.pt`: Oracle Fact Bank（tokenized facts）
+- `data/pretrain_facts_mapping.pt`: UUID 到 Fact 索引的映射
+- 训练数据中的 UUID 必须在 mapping 中存在
 
 ---
 
