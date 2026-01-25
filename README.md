@@ -82,6 +82,30 @@ uv run accelerate launch --config_file accelerate_config.yaml scripts/train/trai
     --enable_memory_update
 ```
 
+#### Oracle Fact Fusion 训练（只训练 Fusion 组件）
+
+Oracle Fact Fusion 模式用于测试 Fusion 组件的理论上限，直接使用预提取的真实 facts 进行训练，跳过检索步骤。
+
+```bash
+# 使用脚本（已默认启用 Oracle Fact Fusion）
+bash scripts/train/run_fusion_pretrain.sh
+```
+
+**修改 Oracle Fact 数据路径**：
+
+在 `scripts/train/run_fusion_pretrain.sh` 中修改以下配置（第 256-258 行）：
+
+```bash
+ENABLE_ORACLE_FACT_FUSION=true  # 设置为 true 启用
+ORACLE_FACT_BANK_PATH="data/pretrain_facts_memory_bank.pt"      # Fact Bank 路径
+ORACLE_FACT_MAPPING_PATH="data/pretrain_facts_mapping.pt"       # UUID 映射路径
+```
+
+**必需文件**：
+- `pretrain_facts_memory_bank.pt`: Oracle Fact Bank（tokenized facts）
+- `pretrain_facts_mapping.pt`: UUID 到 Fact 索引的映射
+- 训练数据需包含 UUID 字段，且 UUID 必须在 mapping 中存在
+
 ---
 
 ### 2. 模型转换
